@@ -74,7 +74,7 @@ pub(crate) async fn cmd_file_track(
     if num_rebased > 0 {
         writeln!(ui.status(), "Rebased {num_rebased} descendant commits")?;
     }
-    let repo = tx.commit("track paths").await?;
+    let repo = tx.commit("track paths".to_string()).await?;
     locked_ws.finish(repo.op_id().clone()).await?;
     print_track_snapshot_stats(
         ui,

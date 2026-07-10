@@ -445,7 +445,7 @@ pub async fn create_and_check_out_recovery_commit(
         .await?;
     repo_mut.set_wc_commit(workspace_name, new_commit.id().clone())?;
 
-    let repo = tx.commit("recovery commit").await?;
+    let repo = tx.commit("recovery commit".to_string()).await?;
     locked_wc.recover(&new_commit).await?;
 
     Ok((repo, new_commit))

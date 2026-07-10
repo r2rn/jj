@@ -111,8 +111,10 @@ use crate::simple_op_heads_store::SimpleOpHeadsStore;
 use crate::simple_op_store::SimpleOpStore;
 use crate::store::Store;
 use crate::submodule_store::SubmoduleStore;
+use crate::transaction::DefaultTransactionManager;
 use crate::transaction::Transaction;
 use crate::transaction::TransactionCommitError;
+use crate::transaction::TransactionManager;
 use crate::tree_merge::MergeOptions;
 use crate::view::RenameWorkspaceError;
 use crate::view::View;
@@ -204,6 +206,10 @@ impl ReadonlyRepo {
         &|_settings, store_path| Ok(Box::new(DefaultSubmoduleStore::init(store_path)))
     }
 
+    pub fn default_transaction_manager() -> Arc<dyn TransactionManager> {
+        Arc::new(DefaultTransactionManager)
+    }
+
     #[expect(clippy::too_many_arguments)]
     pub async fn init(
         settings: &UserSettings,
@@ -259,14 +265,15 @@ impl ReadonlyRepo {
             .context(&submodule_store_type_path)?;
         let submodule_store = Arc::from(submodule_store);
 
-        let loader = RepoLoader {
-            settings: settings.clone(),
+        let loader = RepoLoader::new(
+            settings.clone(),
             store,
             op_store,
             op_heads_store,
             index_store,
             submodule_store,
-        };
+            Self::default_transaction_manager(),
+        );
 
         let root_operation = loader.root_operation().await;
         let root_view = root_operation
@@ -333,7 +340,7 @@ impl ReadonlyRepo {
 
     pub fn start_transaction(self: &Arc<Self>) -> Transaction {
         let mut_repo = MutableRepo::new(self.clone(), self.readonly_index(), &self.view);
-        Transaction::new(mut_repo, self.settings())
+        self.loader.transaction_manager.start(mut_repo)
     }
 
     pub async fn reload_at_head(&self) -> Result<Arc<Self>, RepoLoaderError> {
@@ -390,7 +397,7 @@ pub type OpStoreInitializer<'a> =
     dyn Fn(&UserSettings, &Path, RootOperationData) -> Result<Box<dyn OpStore>, BackendInitError>
     + 'a;
 #[rustfmt::skip] // auto-formatted line would exceed the maximum width
-pub type OpHeadsStoreInitializer<'a> = 
+pub type OpHeadsStoreInitializer<'a> =
     dyn Fn(&UserSettings, &Path, &OperationId)
     -> Result<Box<dyn OpHeadsStore>, BackendInitError>
     + 'a;
@@ -677,6 +684,7 @@ pub struct RepoLoader {
     op_heads_store: Arc<dyn OpHeadsStore>,
     index_store: Arc<dyn IndexStore>,
     submodule_store: Arc<dyn SubmoduleStore>,
+    transaction_manager: Arc<dyn TransactionManager>,
 }
 
 impl RepoLoader {
@@ -687,6 +695,7 @@ impl RepoLoader {
         op_heads_store: Arc<dyn OpHeadsStore>,
         index_store: Arc<dyn IndexStore>,
         submodule_store: Arc<dyn SubmoduleStore>,
+        transaction_manager: Arc<dyn TransactionManager>,
     ) -> Self {
         Self {
             settings,
@@ -695,6 +704,7 @@ impl RepoLoader {
             op_heads_store,
             index_store,
             submodule_store,
+            transaction_manager,
         }
     }
 
@@ -728,14 +738,15 @@ impl RepoLoader {
         let submodule_store = Arc::from(
             store_factories.load_submodule_store(settings, &repo_path.join("submodule_store"))?,
         );
-        Ok(Self {
-            settings: settings.clone(),
+        Ok(Self::new(
+            settings.clone(),
             store,
             op_store,
             op_heads_store,
             index_store,
             submodule_store,
-        })
+            ReadonlyRepo::default_transaction_manager(),
+        ))
     }
 
     pub fn settings(&self) -> &UserSettings {
@@ -946,7 +957,7 @@ impl MutableRepo {
             && self.view() == &self.base_repo.view)
     }
 
-    pub(crate) fn consume(
+    pub fn consume(
         self,
     ) -> (
         Box<dyn MutableIndex>,

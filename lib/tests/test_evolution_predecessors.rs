@@ -53,7 +53,7 @@ fn test_walk_predecessors_basic() -> TestResult {
 
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo1.start_transaction();
     let commit2 = tx
@@ -62,7 +62,7 @@ fn test_walk_predecessors_basic() -> TestResult {
         .set_description("rewritten")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo2 = tx.commit("test").block_on()?;
+    let repo2 = tx.commit("test".to_string()).block_on()?;
 
     // The root commit has no associated operation because it isn't "created" at
     // the root operation.
@@ -97,7 +97,7 @@ fn test_walk_predecessors_basic_legacy_op() -> TestResult {
 
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo1.start_transaction();
     let commit2 = tx
@@ -106,7 +106,7 @@ fn test_walk_predecessors_basic_legacy_op() -> TestResult {
         .set_description("rewritten")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo2 = tx.commit("test").block_on()?;
+    let repo2 = tx.commit("test".to_string()).block_on()?;
 
     // Save operation without the predecessors as old jj would do.
     let repo2 = {
@@ -132,7 +132,7 @@ fn test_walk_predecessors_concurrent_ops() -> TestResult {
 
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx2 = repo1.start_transaction();
     let commit2 = tx2
@@ -170,7 +170,7 @@ fn test_walk_predecessors_concurrent_ops() -> TestResult {
         .set_description("rewritten 5")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo5 = tx.commit("test").block_on()?;
+    let repo5 = tx.commit("test".to_string()).block_on()?;
 
     let entries = collect_predecessors(&repo5, commit4.id());
     assert_eq!(entries.len(), 3);
@@ -205,11 +205,11 @@ fn test_walk_predecessors_multiple_predecessors_across_ops() -> TestResult {
 
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo1.start_transaction();
     let commit2 = write_random_commit(tx.repo_mut());
-    let repo2 = tx.commit("test").block_on()?;
+    let repo2 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo2.start_transaction();
     let commit3 = tx
@@ -219,7 +219,7 @@ fn test_walk_predecessors_multiple_predecessors_across_ops() -> TestResult {
         .set_description("rewritten")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo3 = tx.commit("test").block_on()?;
+    let repo3 = tx.commit("test".to_string()).block_on()?;
 
     // Predecessor commits are emitted in chronological (operation) order.
     let entries = collect_predecessors(&repo3, commit3.id());
@@ -247,7 +247,7 @@ fn test_walk_predecessors_multiple_predecessors_within_op() -> TestResult {
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
     let commit2 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo1.start_transaction();
     let commit3 = tx
@@ -257,7 +257,7 @@ fn test_walk_predecessors_multiple_predecessors_within_op() -> TestResult {
         .set_description("rewritten")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo2 = tx.commit("test").block_on()?;
+    let repo2 = tx.commit("test".to_string()).block_on()?;
 
     let entries = collect_predecessors(&repo2, commit3.id());
     assert_eq!(entries.len(), 3);
@@ -283,7 +283,7 @@ fn test_walk_predecessors_transitive() -> TestResult {
 
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo1.start_transaction();
     let commit2 = tx
@@ -297,7 +297,7 @@ fn test_walk_predecessors_transitive() -> TestResult {
         .set_description("rewritten 3")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo2 = tx.commit("test").block_on()?;
+    let repo2 = tx.commit("test".to_string()).block_on()?;
 
     let entries = collect_predecessors(&repo2, commit3.id());
     assert_eq!(entries.len(), 3);
@@ -344,7 +344,7 @@ fn test_walk_predecessors_transitive_graph_order() -> TestResult {
         .set_description("rewritten 4")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo1.start_transaction();
     let commit5 = tx
@@ -354,7 +354,7 @@ fn test_walk_predecessors_transitive_graph_order() -> TestResult {
         .set_description("rewritten 5")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo2 = tx.commit("test").block_on()?;
+    let repo2 = tx.commit("test".to_string()).block_on()?;
 
     let entries = collect_predecessors(&repo2, commit5.id());
     assert_eq!(entries.len(), 5);
@@ -392,7 +392,7 @@ fn test_walk_predecessors_unsimplified() -> TestResult {
 
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo1.start_transaction();
     let commit2 = tx
@@ -401,7 +401,7 @@ fn test_walk_predecessors_unsimplified() -> TestResult {
         .set_description("rewritten 2")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo2 = tx.commit("test").block_on()?;
+    let repo2 = tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo2.start_transaction();
     let commit3 = tx
@@ -411,7 +411,7 @@ fn test_walk_predecessors_unsimplified() -> TestResult {
         .set_description("rewritten 3")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo3 = tx.commit("test").block_on()?;
+    let repo3 = tx.commit("test".to_string()).block_on()?;
 
     let entries = collect_predecessors(&repo3, commit3.id());
     assert_eq!(entries.len(), 3);
@@ -438,7 +438,7 @@ fn test_walk_predecessors_direct_cycle_within_op() -> TestResult {
 
     let mut tx = repo0.start_transaction();
     let commit1 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let repo1 = {
         let mut data = repo1.operation().store_operation().clone();
@@ -469,7 +469,7 @@ fn test_walk_predecessors_indirect_cycle_within_op() -> TestResult {
     let commit1 = write_random_commit(tx.repo_mut());
     let commit2 = write_random_commit(tx.repo_mut());
     let commit3 = write_random_commit(tx.repo_mut());
-    let repo1 = tx.commit("test").block_on()?;
+    let repo1 = tx.commit("test".to_string()).block_on()?;
 
     let repo1 = {
         let mut data = repo1.operation().store_operation().clone();
@@ -534,26 +534,26 @@ fn test_accumulate_predecessors() -> TestResult {
     let commit_a1 = new_commit(tx.repo_mut(), "a1");
     let commit_a2 = new_commit(tx.repo_mut(), "a2");
     let commit_a3 = new_commit(tx.repo_mut(), "a3");
-    let repo_a = tx.commit("a").block_on()?;
+    let repo_a = tx.commit("a".to_string()).block_on()?;
 
     let mut tx = repo_a.start_transaction();
     let commit_b1 = rewrite_commit(tx.repo_mut(), &[&commit_a1], "b1");
     let commit_b2 = rewrite_commit(tx.repo_mut(), &[&commit_a2, &commit_a3], "b2");
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo_b = tx.commit("b").block_on()?;
+    let repo_b = tx.commit("b".to_string()).block_on()?;
 
     let mut tx = repo_b.start_transaction();
     let commit_c1 = rewrite_commit(tx.repo_mut(), &[&commit_b1], "c1");
     let commit_c2 = rewrite_commit(tx.repo_mut(), &[&commit_b2, &commit_a3], "c2");
     let commit_c3 = rewrite_commit(tx.repo_mut(), &[&commit_c2], "c3");
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo_c = tx.commit("c").block_on()?;
+    let repo_c = tx.commit("c".to_string()).block_on()?;
 
     let mut tx = repo_a.start_transaction();
     let commit_d1 = rewrite_commit(tx.repo_mut(), &[&commit_a1], "d1");
     let commit_d2 = rewrite_commit(tx.repo_mut(), &[&commit_a2], "d2");
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo_d = tx.commit("d").block_on()?;
+    let repo_d = tx.commit("d".to_string()).block_on()?;
 
     // Empty old/new ops
     let predecessors =

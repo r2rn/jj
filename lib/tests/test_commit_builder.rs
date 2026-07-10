@@ -118,7 +118,7 @@ fn test_initial(backend: TestRepoBackend) -> TestResult {
     assert_eq!(builder.author(), &author_signature);
     assert_eq!(builder.committer(), &committer_signature);
     let commit = builder.write_unwrap();
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     let parents = commit.parents().block_on()?;
     assert_eq!(parents, vec![store.root_commit()]);
@@ -161,7 +161,7 @@ fn test_rewrite(backend: TestRepoBackend) -> TestResult {
         .repo_mut()
         .new_commit(vec![store.root_commit_id().clone()], initial_tree)
         .write_unwrap();
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     let rewritten_tree = create_tree(
         &repo,
@@ -194,7 +194,7 @@ fn test_rewrite(backend: TestRepoBackend) -> TestResult {
         .set_tree(rewritten_tree)
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
     let parents = rewritten_commit.parents().block_on()?;
     assert_eq!(parents, vec![store.root_commit()]);
     assert_eq!(
@@ -252,7 +252,7 @@ fn test_rewrite_update_missing_user(backend: TestRepoBackend) -> TestResult {
     assert_eq!(initial_commit.author().email, "");
     assert_eq!(initial_commit.committer().name, "");
     assert_eq!(initial_commit.committer().email, "");
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let mut config = StackedConfig::with_defaults();
     config.add_layer(ConfigLayer::parse(
@@ -299,7 +299,7 @@ fn test_rewrite_resets_author_timestamp(backend: TestRepoBackend) -> TestResult 
             repo.store().empty_merged_tree(),
         )
         .write_unwrap();
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let initial_timestamp =
         Timestamp::from_datetime(chrono::DateTime::parse_from_rfc3339(initial_timestamp)?);
@@ -318,7 +318,7 @@ fn test_rewrite_resets_author_timestamp(backend: TestRepoBackend) -> TestResult 
         .set_description("No longer discardable")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let new_timestamp_1 =
         Timestamp::from_datetime(chrono::DateTime::parse_from_rfc3339(new_timestamp_1)?);
@@ -340,7 +340,7 @@ fn test_rewrite_resets_author_timestamp(backend: TestRepoBackend) -> TestResult 
         .set_description("New description")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let new_timestamp_2 =
         Timestamp::from_datetime(chrono::DateTime::parse_from_rfc3339(new_timestamp_2)?);
@@ -368,7 +368,7 @@ fn test_rewrite_to_identical_commit(backend: TestRepoBackend) -> TestResult {
             store.empty_merged_tree(),
         )
         .write_unwrap();
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     // Create commit identical to the original
     let mut tx = repo.start_transaction();
@@ -382,7 +382,7 @@ fn test_rewrite_to_identical_commit(backend: TestRepoBackend) -> TestResult {
     let result = builder.write(tx.repo_mut()).block_on();
     assert_matches!(result, Err(BackendError::Other(_)));
     tx.repo_mut().rebase_descendants().block_on()?;
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     // Create two rewritten commits of the same content and metadata
     let mut tx = repo.start_transaction();
@@ -398,7 +398,7 @@ fn test_rewrite_to_identical_commit(backend: TestRepoBackend) -> TestResult {
         .block_on();
     assert_matches!(result, Err(BackendError::Other(_)));
     tx.repo_mut().rebase_descendants().block_on()?;
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
     Ok(())
 }
 
@@ -413,7 +413,7 @@ fn test_commit_builder_descendants(backend: TestRepoBackend) -> TestResult {
     let commit1 = write_random_commit(tx.repo_mut());
     let commit2 = write_random_commit_with_parents(tx.repo_mut(), &[&commit1]);
     let commit3 = write_random_commit_with_parents(tx.repo_mut(), &[&commit2]);
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     // Test with for_new_commit()
     let mut tx = repo.start_transaction();

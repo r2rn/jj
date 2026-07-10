@@ -76,7 +76,7 @@ fn test_unpublished_operation() -> TestResult {
 
     let mut tx1 = repo.start_transaction();
     write_random_commit(tx1.repo_mut());
-    let unpublished_op = tx1.write("transaction 1").block_on()?;
+    let unpublished_op = tx1.write("transaction 1".to_string()).block_on()?;
     let op_id1 = unpublished_op.operation().id().clone();
     assert_ne!(op_id1, op_id0);
     assert_eq!(list_dir(&op_heads_dir), vec![op_id0.hex()]);
@@ -99,7 +99,7 @@ fn test_consecutive_operations() -> TestResult {
     let mut tx1 = repo.start_transaction();
     write_random_commit(tx1.repo_mut());
     let op_id1 = tx1
-        .commit("transaction 1")
+        .commit("transaction 1".to_string())
         .block_on()?
         .operation()
         .id()
@@ -111,7 +111,7 @@ fn test_consecutive_operations() -> TestResult {
     let mut tx2 = repo.start_transaction();
     write_random_commit(tx2.repo_mut());
     let op_id2 = tx2
-        .commit("transaction 2")
+        .commit("transaction 2".to_string())
         .block_on()?
         .operation()
         .id()
@@ -141,7 +141,7 @@ fn test_concurrent_operations() -> TestResult {
     let mut tx1 = repo.start_transaction();
     write_random_commit(tx1.repo_mut());
     let op_id1 = tx1
-        .commit("transaction 1")
+        .commit("transaction 1".to_string())
         .block_on()?
         .operation()
         .id()
@@ -154,7 +154,7 @@ fn test_concurrent_operations() -> TestResult {
     let mut tx2 = repo.start_transaction();
     write_random_commit(tx2.repo_mut());
     let op_id2 = tx2
-        .commit("transaction 2")
+        .commit("transaction 2".to_string())
         .block_on()?
         .operation()
         .id()
@@ -190,7 +190,7 @@ fn test_isolation() -> TestResult {
 
     let mut tx = repo.start_transaction();
     let initial = write_random_commit_with_parents(tx.repo_mut(), &[]);
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     let mut tx1 = repo.start_transaction();
     let mut_repo1 = tx1.repo_mut();
@@ -219,12 +219,12 @@ fn test_isolation() -> TestResult {
     assert_heads(mut_repo2, vec![rewrite2.id()]);
 
     // The base repo and tx2 don't see the commits from tx1.
-    tx1.commit("transaction 1").block_on()?;
+    tx1.commit("transaction 1".to_string()).block_on()?;
     assert_heads(repo.as_ref(), vec![initial.id()]);
     assert_heads(mut_repo2, vec![rewrite2.id()]);
 
     // The base repo still doesn't see the commits after both transactions commit.
-    tx2.commit("transaction 2").block_on()?;
+    tx2.commit("transaction 2".to_string()).block_on()?;
     assert_heads(repo.as_ref(), vec![initial.id()]);
     // After reload, the base repo sees both rewrites.
     let repo = repo.reload_at_head().block_on()?;
@@ -246,7 +246,7 @@ fn test_stored_commit_predecessors() -> TestResult {
         .set_description("rewritten")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     // Reload operation from disk.
     let op = loader.load_operation(repo.op_id()).block_on()?;
@@ -289,10 +289,10 @@ fn test_reparent_range_linear() -> TestResult {
         write_random_commit(tx.repo_mut());
         tx
     };
-    let repo_a = random_tx(&repo_0).commit("op A").block_on()?;
-    let repo_b = random_tx(&repo_a).commit("op B").block_on()?;
-    let repo_c = random_tx(&repo_b).commit("op C").block_on()?;
-    let repo_d = random_tx(&repo_c).commit("op D").block_on()?;
+    let repo_a = random_tx(&repo_0).commit("op A".to_string()).block_on()?;
+    let repo_b = random_tx(&repo_a).commit("op B".to_string()).block_on()?;
+    let repo_c = random_tx(&repo_b).commit("op C".to_string()).block_on()?;
+    let repo_d = random_tx(&repo_c).commit("op D".to_string()).block_on()?;
 
     // Reparent B..D (=C|D) onto A:
     // D'
@@ -361,10 +361,10 @@ fn test_reparent_range_branchy() -> TestResult {
         write_random_commit(tx.repo_mut());
         tx
     };
-    let repo_a = random_tx(&repo_0).commit("op A").block_on()?;
-    let repo_b = random_tx(&repo_a).commit("op B").block_on()?;
-    let repo_c = random_tx(&repo_b).commit("op C").block_on()?;
-    let repo_d = random_tx(&repo_c).commit("op D").block_on()?;
+    let repo_a = random_tx(&repo_0).commit("op A".to_string()).block_on()?;
+    let repo_b = random_tx(&repo_a).commit("op B".to_string()).block_on()?;
+    let repo_c = random_tx(&repo_b).commit("op C".to_string()).block_on()?;
+    let repo_d = random_tx(&repo_c).commit("op D".to_string()).block_on()?;
     let tx_e = random_tx(&repo_d);
     let tx_f = random_tx(&repo_c);
     let repo_g = testutils::commit_transactions(vec![tx_e, tx_f]);
@@ -499,7 +499,7 @@ fn test_reparent_discarding_predecessors() -> TestResult {
     let mut tx = repo_0.start_transaction();
     let commit_a0 = write_random_commit(tx.repo_mut());
     let commit_b0 = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a0]);
-    let repo_1 = tx.commit("op1").block_on()?;
+    let repo_1 = tx.commit("op1".to_string()).block_on()?;
 
     let mut tx = repo_1.start_transaction();
     let commit_a1 = tx
@@ -510,12 +510,12 @@ fn test_reparent_discarding_predecessors() -> TestResult {
     tx.repo_mut().rebase_descendants().block_on()?;
     let [commit_b1] = head_commits(tx.repo()).try_into().unwrap();
     tx.repo_mut().add_head(&commit_b0).block_on()?; // resurrect rewritten commits
-    let repo_2 = tx.commit("op2").block_on()?;
+    let repo_2 = tx.commit("op2".to_string()).block_on()?;
 
     let mut tx = repo_2.start_transaction();
     tx.repo_mut().record_abandoned_commit(&commit_b0);
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo_3 = tx.commit("op3").block_on()?;
+    let repo_3 = tx.commit("op3".to_string()).block_on()?;
 
     let mut tx = repo_3.start_transaction();
     tx.repo_mut().record_abandoned_commit(&commit_a0);
@@ -526,7 +526,7 @@ fn test_reparent_discarding_predecessors() -> TestResult {
         .set_description("a2")
         .write_unwrap();
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo_4 = tx.commit("op4").block_on()?;
+    let repo_4 = tx.commit("op4".to_string()).block_on()?;
 
     // Sanity check for the setup
     assert_eq!(repo_1.view().heads().len(), 1);
@@ -725,7 +725,7 @@ fn test_resolve_op_parents_children() -> TestResult {
     let mut repos = Vec::new();
     for _ in 0..3 {
         let tx = repo.start_transaction();
-        repos.push(tx.commit("test").block_on()?);
+        repos.push(tx.commit("test".to_string()).block_on()?);
         repo = repos.last().unwrap();
     }
     let operations = repos.iter().map(|repo| repo.operation()).collect_vec();
@@ -867,19 +867,31 @@ fn test_walk_ancestors() -> TestResult {
     // A |
     // |/
     // 0 (initial)
-    let repo_a = repo_0.start_transaction().commit("op A").block_on()?;
+    let repo_a = repo_0
+        .start_transaction()
+        .commit("op A".to_string())
+        .block_on()?;
     let repo_b = repo_0
         .start_transaction()
-        .write("op B")
+        .write("op B".to_string())
         .block_on()?
         .leave_unpublished();
-    let repo_c = repo_a.start_transaction().commit("op C").block_on()?;
-    let repo_d = repo_c.start_transaction().commit("op D").block_on()?;
+    let repo_c = repo_a
+        .start_transaction()
+        .commit("op C".to_string())
+        .block_on()?;
+    let repo_d = repo_c
+        .start_transaction()
+        .commit("op D".to_string())
+        .block_on()?;
     let tx_e = repo_d.start_transaction();
     let tx_f = repo_c.start_transaction();
     let repo_g = testutils::commit_transactions(vec![tx_e, tx_f]);
     let [op_e, op_f] = op_parents(repo_g.operation());
-    let repo_h = repo_g.start_transaction().commit("op H").block_on()?;
+    let repo_h = repo_g
+        .start_transaction()
+        .commit("op H".to_string())
+        .block_on()?;
 
     // At merge, parents are visited in forward order, which isn't important.
     assert_eq!(
@@ -989,12 +1001,12 @@ fn test_gc() -> TestResult {
         write_random_commit(tx.repo_mut());
         tx
     };
-    let repo_a = random_tx(&repo_0).commit("op A").block_on()?;
-    let repo_b = random_tx(&repo_a).commit("op B").block_on()?;
-    let repo_c = random_tx(&repo_b).commit("op C").block_on()?;
-    let repo_d = random_tx(&repo_c).commit("op D").block_on()?;
-    let repo_e = empty_tx(&repo_b).commit("op E").block_on()?;
-    let repo_f = random_tx(&repo_e).commit("op F").block_on()?;
+    let repo_a = random_tx(&repo_0).commit("op A".to_string()).block_on()?;
+    let repo_b = random_tx(&repo_a).commit("op B".to_string()).block_on()?;
+    let repo_c = random_tx(&repo_b).commit("op C".to_string()).block_on()?;
+    let repo_d = random_tx(&repo_c).commit("op D".to_string()).block_on()?;
+    let repo_e = empty_tx(&repo_b).commit("op E".to_string()).block_on()?;
+    let repo_f = random_tx(&repo_e).commit("op F".to_string()).block_on()?;
 
     // Sanity check for the original state
     let mut expected_op_entries = list_dir(&op_dir);

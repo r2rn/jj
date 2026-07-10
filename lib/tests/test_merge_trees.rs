@@ -90,7 +90,7 @@ fn test_simplify_conflict_after_resolving_parent() -> TestResult {
     let commit_c3 =
         rebase_commit(tx.repo_mut(), commit_c2, vec![commit_b3.id().clone()]).block_on()?;
     tx.repo_mut().rebase_descendants().block_on()?;
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     // The conflict should now be resolved.
     let tree_c2 = commit_c3.tree();

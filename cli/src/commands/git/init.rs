@@ -274,7 +274,7 @@ async fn init_git_refs(
         let stats = git::export_refs(tx.repo_mut())?;
         print_git_export_stats(ui, &stats)?;
     }
-    let repo = tx.commit("import git refs").await?;
+    let repo = tx.commit("import git refs".to_string()).await?;
     writeln!(
         ui.status(),
         "Done importing changes from the underlying Git repo."

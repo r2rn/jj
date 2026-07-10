@@ -75,7 +75,7 @@ pub async fn cmd_op_integrate(
                 "The specified operation has been integrated with other existing operations."
             )?;
             Ok(tx
-                .write("reconcile divergent operations")
+                .write("reconcile divergent operations".to_string())
                 .await?
                 .leave_unpublished()
                 .operation()

@@ -427,7 +427,7 @@ impl CommandHelper {
         tx: Transaction,
         description: impl Into<String>,
     ) -> Result<Arc<ReadonlyRepo>, TransactionCommitError> {
-        let unpublished_op = tx.write(description).await?;
+        let unpublished_op = tx.write(description.into()).await?;
         if self.should_commit_transaction() {
             unpublished_op.publish().await
         } else {
@@ -745,7 +745,7 @@ impl CommandHelper {
                         }
                     }
                     Ok(tx
-                        .write("reconcile divergent operations")
+                        .write("reconcile divergent operations".to_string())
                         .await?
                         .leave_unpublished()
                         .operation()

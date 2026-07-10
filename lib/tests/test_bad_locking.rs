@@ -114,7 +114,7 @@ fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
 
     let mut tx = repo.start_transaction();
     let initial = write_random_commit(tx.repo_mut());
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     // Simulate a write of a commit that happens on one machine
     let machine1_root = test_workspace.root_dir().join("machine1");
@@ -128,7 +128,7 @@ fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
     let machine1_repo = machine1_workspace.repo_loader().load_at_head().block_on()?;
     let mut machine1_tx = machine1_repo.start_transaction();
     let child1 = write_random_commit_with_parents(machine1_tx.repo_mut(), &[&initial]);
-    machine1_tx.commit("test").block_on()?;
+    machine1_tx.commit("test".to_string()).block_on()?;
 
     // Simulate a write of a commit that happens on another machine
     let machine2_root = test_workspace.root_dir().join("machine2");
@@ -142,7 +142,7 @@ fn test_bad_locking_children(backend: TestRepoBackend) -> TestResult {
     let machine2_repo = machine2_workspace.repo_loader().load_at_head().block_on()?;
     let mut machine2_tx = machine2_repo.start_transaction();
     let child2 = write_random_commit_with_parents(machine2_tx.repo_mut(), &[&initial]);
-    machine2_tx.commit("test").block_on()?;
+    machine2_tx.commit("test".to_string()).block_on()?;
 
     // Simulate that the distributed file system now has received the changes from
     // both machines
@@ -176,7 +176,7 @@ fn test_bad_locking_interrupted(backend: TestRepoBackend) -> TestResult {
 
     let mut tx = repo.start_transaction();
     let initial = write_random_commit(tx.repo_mut());
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     // Simulate a crash that resulted in the old op-head left in place. We simulate
     // it somewhat hackily by copying the .jj/op_heads/ directory before the
@@ -187,7 +187,12 @@ fn test_bad_locking_interrupted(backend: TestRepoBackend) -> TestResult {
     copy_directory(&op_heads_dir, &backup_path);
     let mut tx = repo.start_transaction();
     write_random_commit_with_parents(tx.repo_mut(), &[&initial]);
-    let op_id = tx.commit("test").block_on()?.operation().id().clone();
+    let op_id = tx
+        .commit("test".to_string())
+        .block_on()?
+        .operation()
+        .id()
+        .clone();
 
     copy_directory(&backup_path, &op_heads_dir);
     // Reload the repo and check that only the new head is present.

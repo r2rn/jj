@@ -272,7 +272,7 @@ fn test_checkout_file_transitions(backend: TestRepoBackend) -> TestResult {
             Kind::GitSubmodule => {
                 let mut tx = repo.start_transaction();
                 let id = write_random_commit(tx.repo_mut()).id().clone();
-                tx.commit("test").block_on().unwrap();
+                tx.commit("test".to_string()).block_on().unwrap();
                 Merge::normal(TreeValue::GitSubmodule(id))
             }
         };
@@ -1334,7 +1334,7 @@ fn test_snapshot_modified_materialized_conflict(
         .new_commit(vec![base_commit.id().clone()], tree)
         .write_unwrap();
     // Update the repo to pick up the new commits.
-    test_workspace.repo = tx.commit("create parent commits").block_on()?;
+    test_workspace.repo = tx.commit("create parent commits".to_string()).block_on()?;
 
     // Create the merge commit.
     let tree =

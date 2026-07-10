@@ -222,7 +222,7 @@ fn create_conflict_snapshot_and_read(extra_setting: &str) -> Vec<u8> {
         .repo_mut()
         .new_commit(vec![root_commit.id().clone()], tree)
         .write_unwrap();
-    tx.commit("commit parent1").block_on().unwrap();
+    tx.commit("commit parent1".to_string()).block_on().unwrap();
 
     test_workspace
         .workspace
@@ -240,7 +240,7 @@ fn create_conflict_snapshot_and_read(extra_setting: &str) -> Vec<u8> {
         .repo_mut()
         .new_commit(vec![root_commit.id().clone()], tree)
         .write_unwrap();
-    tx.commit("commit parent2").block_on().unwrap();
+    tx.commit("commit parent2".to_string()).block_on().unwrap();
 
     // Reload the repo to pick up the new commits.
     test_workspace.repo = test_workspace.repo.reload_at_head().block_on().unwrap();
@@ -428,7 +428,7 @@ fn test_eol_conversion_update_conflicts(
         .repo_mut()
         .new_commit(vec![root_commit.id().clone()], tree)
         .write_unwrap();
-    tx.commit("commit parent 2").block_on()?;
+    tx.commit("commit parent 2".to_string()).block_on()?;
 
     // Reload the repo to pick up the new commits.
     test_workspace.repo = test_workspace.repo.reload_at_head().block_on()?;

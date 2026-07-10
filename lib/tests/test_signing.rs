@@ -80,7 +80,7 @@ fn manual(backend: TestRepoBackend) -> TestResult {
         .set_sign_behavior(SignBehavior::Own)
         .set_author(someone_else())
         .write_unwrap();
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let commit1 = repo.store().get_commit(commit1.id())?;
     assert_eq!(commit1.verification()?, good_verification());
@@ -104,7 +104,7 @@ fn keep_on_rewrite(backend: TestRepoBackend) -> TestResult {
     let commit = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Own)
         .write_unwrap();
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
@@ -129,7 +129,7 @@ fn manual_drop_on_rewrite(backend: TestRepoBackend) -> TestResult {
     let commit = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Own)
         .write_unwrap();
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let mut tx = repo.start_transaction();
     let mut_repo = tx.repo_mut();
@@ -157,7 +157,7 @@ fn forced(backend: TestRepoBackend) -> TestResult {
     let commit = create_random_commit(tx.repo_mut())
         .set_author(someone_else())
         .write_unwrap();
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let commit = repo.store().get_commit(commit.id())?;
     assert_eq!(commit.verification()?, good_verification());
@@ -176,7 +176,7 @@ fn configured(backend: TestRepoBackend) -> TestResult {
     let repo = repo.clone();
     let mut tx = repo.start_transaction();
     let commit = write_random_commit(tx.repo_mut());
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let commit = repo.store().get_commit(commit.id())?;
     assert_eq!(commit.verification()?, good_verification());
@@ -197,7 +197,7 @@ fn drop_behavior(backend: TestRepoBackend) -> TestResult {
     let commit = create_random_commit(tx.repo_mut())
         .set_sign_behavior(SignBehavior::Own)
         .write_unwrap();
-    tx.commit("test").block_on()?;
+    tx.commit("test".to_string()).block_on()?;
 
     let original_commit = repo.store().get_commit(commit.id())?;
     assert_eq!(original_commit.verification()?, good_verification());

@@ -43,7 +43,7 @@ fn test_merge_ref_targets() -> TestResult {
     let commit5 = write_random_commit_with_parents(tx.repo_mut(), &[&commit1]);
     let commit6 = write_random_commit_with_parents(tx.repo_mut(), &[&commit5]);
     let commit7 = write_random_commit_with_parents(tx.repo_mut(), &[&commit5]);
-    let repo = tx.commit("test").block_on()?;
+    let repo = tx.commit("test".to_string()).block_on()?;
 
     let target1 = RefTarget::normal(commit1.id().clone());
     let target2 = RefTarget::normal(commit2.id().clone());

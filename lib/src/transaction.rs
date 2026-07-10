@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::backend::Timestamp;
@@ -51,25 +52,60 @@ pub enum TransactionCommitError {
 ///
 /// Within the scope of a transaction, changes to the repository are made
 /// in-memory to `mut_repo` and published to the repo backend when
-/// [`Transaction::commit`] is called. When a transaction is committed, it
-/// becomes atomically visible as an Operation in the op log that represents the
-/// transaction itself, and as a View that represents the state of the repo
+/// [`TransactionBackend::commit`] is called. When a transaction is committed,
+/// it becomes atomically visible as an Operation in the op log that represents
+/// the transaction itself, and as a View that represents the state of the repo
 /// after the transaction. This is similar to how a Commit represents a change
 /// to the contents of the repository and a Tree represents the repository's
 /// contents after the change. See the documentation for [`op_store::Operation`]
 /// and [`op_store::View`] for more information.
-pub struct Transaction {
+pub type Transaction = Box<dyn TransactionBackend>;
+
+pub trait TransactionManager: Send + Sync {
+
+    fn start(&self, mut_repo: MutableRepo) -> Box<dyn TransactionBackend>;
+}
+
+pub struct DefaultTransactionManager;
+
+impl TransactionManager for DefaultTransactionManager {
+    fn start(&self, mut_repo: MutableRepo) -> Box<dyn TransactionBackend> {
+        Box::new(DefaultTransactionBackend::new(mut_repo))
+    }
+}
+
+#[async_trait(?Send)]
+pub trait TransactionBackend {
+    fn base_repo(&self) -> &Arc<ReadonlyRepo>;
+    fn set_attribute(&mut self, key: String, value: String);
+    fn repo(&self) -> &MutableRepo;
+    fn repo_mut(&mut self) -> &mut MutableRepo;
+    async fn merge_operation(&mut self, other_op: Operation) -> Result<(), RepoLoaderError>;
+    fn set_is_snapshot(&mut self, is_snapshot: bool);
+    fn set_workspace_name(&mut self, workspace_name: &WorkspaceName);
+    async fn commit(
+        self: Box<Self>,
+        description: String,
+    ) -> Result<Arc<ReadonlyRepo>, TransactionCommitError>;
+    async fn write(
+        self: Box<Self>,
+        description: String,
+    ) -> Result<UnpublishedOperation, TransactionCommitError>;
+}
+
+pub struct DefaultTransactionBackend {
     mut_repo: MutableRepo,
     parent_ops: Vec<Operation>,
     op_metadata: OperationMetadata,
     end_time: Option<Timestamp>,
 }
 
-impl Transaction {
-    pub fn new(mut_repo: MutableRepo, user_settings: &UserSettings) -> Self {
+impl DefaultTransactionBackend {
+    pub fn new(mut_repo: MutableRepo) -> Self {
+        let settings = mut_repo.base_repo().settings();
         let parent_ops = vec![mut_repo.base_repo().operation().clone()];
-        let op_metadata = create_op_metadata(user_settings, "".to_string(), false);
-        let end_time = user_settings.operation_timestamp();
+        let op_metadata = create_op_metadata(settings, "".to_string(), false);
+        let end_time = settings.operation_timestamp();
         Self {
             mut_repo,
             parent_ops,
@@ -77,24 +113,27 @@ impl Transaction {
             end_time,
         }
     }
+}
 
-    pub fn base_repo(&self) -> &Arc<ReadonlyRepo> {
+#[async_trait(?Send)]
+impl TransactionBackend for DefaultTransactionBackend {
+    fn base_repo(&self) -> &Arc<ReadonlyRepo> {
         self.mut_repo.base_repo()
     }
 
-    pub fn set_attribute(&mut self, key: String, value: String) {
+    fn set_attribute(&mut self, key: String, value: String) {
         self.op_metadata.attributes.insert(key, value);
     }
 
-    pub fn repo(&self) -> &MutableRepo {
+    fn repo(&self) -> &MutableRepo {
         &self.mut_repo
     }
 
-    pub fn repo_mut(&mut self) -> &mut MutableRepo {
+    fn repo_mut(&mut self) -> &mut MutableRepo {
         &mut self.mut_repo
     }
 
-    pub async fn merge_operation(&mut self, other_op: Operation) -> Result<(), RepoLoaderError> {
+    async fn merge_operation(&mut self, other_op: Operation) -> Result<(), RepoLoaderError> {
         let ancestor_ops =
             op_walk::closest_common_ancestors(self.parent_ops.iter().cloned(), [other_op.clone()])
                 .await?;
@@ -108,30 +147,27 @@ impl Transaction {
         Ok(())
     }
 
-    pub fn set_is_snapshot(&mut self, is_snapshot: bool) {
+    fn set_is_snapshot(&mut self, is_snapshot: bool) {
         self.op_metadata.is_snapshot = is_snapshot;
     }
 
-    pub fn set_workspace_name(&mut self, workspace_name: &WorkspaceName) {
+    fn set_workspace_name(&mut self, workspace_name: &WorkspaceName) {
         self.op_metadata.workspace_name = Some(workspace_name.to_owned());
     }
 
-    /// Writes the transaction to the operation store and publishes it.
-    pub async fn commit(
-        self,
-        description: impl Into<String>,
+    async fn commit(
+        self: Box<Self>,
+        description: String,
     ) -> Result<Arc<ReadonlyRepo>, TransactionCommitError> {
         self.write(description).await?.publish().await
     }
 
-    /// Writes the transaction to the operation store, but does not publish it.
-    /// That means that a repo can be loaded at the operation, but the
-    /// operation will not be seen when loading the repo at head.
-    pub async fn write(
-        mut self,
-        description: impl Into<String>,
+    async fn write(
+        self: Box<Self>,
+        description: String,
     ) -> Result<UnpublishedOperation, TransactionCommitError> {
-        let mut_repo = self.mut_repo;
+        let mut transaction = *self;
+        let mut_repo = transaction.mut_repo;
         // TODO: Should we instead just do the rebasing here if necessary?
         assert!(
             !mut_repo.has_rewrites(),
@@ -142,13 +178,17 @@ impl Transaction {
 
         let operation = {
             let view_id = base_repo.op_store().write_view(view.store_view()).await?;
-            self.op_metadata.description = description.into();
-            self.op_metadata.time.end = self.end_time.unwrap_or_else(Timestamp::now);
-            let parents = self.parent_ops.iter().map(|op| op.id().clone()).collect();
+            transaction.op_metadata.description = description;
+            transaction.op_metadata.time.end = transaction.end_time.unwrap_or_else(Timestamp::now);
+            let parents = transaction
+                .parent_ops
+                .iter()
+                .map(|op| op.id().clone())
+                .collect();
             let store_operation = op_store::Operation {
                 view_id,
                 parents,
-                metadata: self.op_metadata,
+                metadata: transaction.op_metadata,
                 commit_predecessors: Some(predecessors),
             };
             let new_op_id = base_repo
