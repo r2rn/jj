@@ -94,6 +94,15 @@ impl Transaction {
         &mut self.mut_repo
     }
 
+    /// Takes ownership of the mutable repository without writing an operation.
+    ///
+    /// This is intended for hosts which use Jujutsu transactions as an
+    /// in-memory execution engine but publish views and indexes through their
+    /// own transaction protocol.
+    pub fn into_mut_repo(self) -> MutableRepo {
+        self.mut_repo
+    }
+
     pub async fn merge_operation(&mut self, other_op: Operation) -> Result<(), RepoLoaderError> {
         let ancestor_ops =
             op_walk::closest_common_ancestors(self.parent_ops.iter().cloned(), [other_op.clone()])

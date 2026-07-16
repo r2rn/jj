@@ -40,6 +40,9 @@ use super::composite::CommitIndexSegmentId;
 use super::composite::CompositeCommitIndex;
 use super::composite::CompositeIndex;
 use super::composite::DynCommitIndexSegment;
+use super::delta::ChangedPathRecord;
+use super::delta::IndexCommitRecord;
+use super::delta::IndexDelta;
 use super::entry::GlobalCommitPosition;
 use super::entry::LocalCommitPosition;
 use super::entry::SmallGlobalCommitPositionsVec;
@@ -479,6 +482,45 @@ impl DefaultMutableIndex {
         self,
     ) -> (Box<MutableCommitIndexSegment>, CompositeChangedPathIndex) {
         self.0.into_mutable().expect("must have mutable")
+    }
+
+    /// Consumes this overlay and returns its storage-neutral logical records.
+    ///
+    /// Parent IDs are resolved before the default index's local positions are
+    /// discarded. The resulting records can be appended against a newer base
+    /// index without preserving this overlay's temporary positions.
+    pub fn into_delta(mut self) -> IndexDelta {
+        let first_position = self
+            .0
+            .mutable_commits()
+            .expect("must have mutable")
+            .num_parent_commits;
+        let commits = self.0.commits();
+        let mut commit_records = Vec::new();
+        let mut changed_path_records = Vec::new();
+
+        for position in (first_position..commits.num_commits()).map(GlobalCommitPosition) {
+            let entry = commits.entry_by_pos(position);
+            let commit_id = entry.commit_id();
+            let parent_ids = entry.parents().map(|parent| parent.commit_id()).collect();
+            commit_records.push(IndexCommitRecord {
+                commit_id: commit_id.clone(),
+                change_id: entry.change_id(),
+                parent_ids,
+            });
+
+            if let Some(paths) = self.0.changed_paths().changed_paths(position) {
+                changed_path_records.push(ChangedPathRecord {
+                    commit_id,
+                    paths: paths.map(|path| path.to_owned()).collect(),
+                });
+            }
+        }
+
+        IndexDelta {
+            commits: commit_records,
+            changed_paths: changed_path_records,
+        }
     }
 
     fn mutable_commits(&mut self) -> &mut MutableCommitIndexSegment {
