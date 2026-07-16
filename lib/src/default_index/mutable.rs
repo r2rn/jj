@@ -68,6 +68,9 @@ use crate::index::ReadonlyIndex;
 use crate::object_id::HexPrefix;
 use crate::object_id::ObjectId;
 use crate::object_id::PrefixResolution;
+use crate::position_index::GlobalPosition;
+use crate::position_index::IndexGraphEntry;
+use crate::position_index::PositionIndex;
 use crate::repo_path::RepoPathBuf;
 use crate::revset::ResolvedExpression;
 use crate::revset::Revset;
@@ -591,6 +594,38 @@ impl AsCompositeIndex for DefaultMutableIndex {
     }
 }
 
+impl PositionIndex for DefaultMutableIndex {
+    fn num_commits(&self) -> u32 {
+        PositionIndex::num_commits(&self.0)
+    }
+
+    fn position_by_commit_id(&self, id: &CommitId) -> IndexResult<Option<GlobalPosition>> {
+        self.0.position_by_commit_id(id)
+    }
+
+    fn entry_by_position(&self, position: GlobalPosition) -> IndexResult<IndexGraphEntry> {
+        self.0.entry_by_position(position)
+    }
+
+    fn resolve_commit_id_prefix(
+        &self,
+        prefix: &HexPrefix,
+    ) -> IndexResult<PrefixResolution<CommitId>> {
+        PositionIndex::resolve_commit_id_prefix(&self.0, prefix)
+    }
+
+    fn resolve_change_id_prefix(
+        &self,
+        prefix: &HexPrefix,
+    ) -> IndexResult<PrefixResolution<Vec<GlobalPosition>>> {
+        self.0.resolve_change_id_prefix(prefix)
+    }
+
+    fn changed_paths(&self, position: GlobalPosition) -> IndexResult<Option<Vec<RepoPathBuf>>> {
+        PositionIndex::changed_paths(&self.0, position)
+    }
+}
+
 impl Index for DefaultMutableIndex {
     fn shortest_unique_commit_id_prefix_len(&self, commit_id: &CommitId) -> IndexResult<usize> {
         self.0.shortest_unique_commit_id_prefix_len(commit_id)
@@ -600,7 +635,7 @@ impl Index for DefaultMutableIndex {
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<CommitId>> {
-        self.0.resolve_commit_id_prefix(prefix)
+        Index::resolve_commit_id_prefix(&self.0, prefix)
     }
 
     fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool> {
@@ -664,6 +699,10 @@ impl MutableIndex for DefaultMutableIndex {
             .expect("index to merge in must be a DefaultReadonlyIndex");
         Self::merge_in(self, other);
         Ok(())
+    }
+
+    fn into_delta(self: Box<Self>) -> IndexResult<IndexDelta> {
+        Ok(Self::into_delta(*self))
     }
 }
 

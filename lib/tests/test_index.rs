@@ -26,6 +26,8 @@ use jj_lib::default_index::DefaultIndexStoreError;
 use jj_lib::default_index::DefaultMutableIndex;
 use jj_lib::default_index::DefaultReadonlyIndex;
 use jj_lib::index::Index;
+use jj_lib::index::IndexError;
+use jj_lib::index::IndexResult;
 use jj_lib::index::ResolvedChangeState;
 use jj_lib::index::ResolvedChangeTargets;
 use jj_lib::object_id::HexPrefix;
@@ -33,6 +35,10 @@ use jj_lib::object_id::ObjectId as _;
 use jj_lib::object_id::PrefixResolution;
 use jj_lib::op_store::RefTarget;
 use jj_lib::op_store::RemoteRef;
+use jj_lib::position_index;
+use jj_lib::position_index::GlobalPosition;
+use jj_lib::position_index::IndexGraphEntry;
+use jj_lib::position_index::PositionIndex;
 use jj_lib::ref_name::RefName;
 use jj_lib::ref_name::RemoteName;
 use jj_lib::ref_name::RemoteRefSymbol;
@@ -43,6 +49,7 @@ use jj_lib::repo_path::RepoPathBuf;
 use jj_lib::revset::GENERATION_RANGE_FULL;
 use jj_lib::revset::PARENTS_RANGE_FULL;
 use jj_lib::revset::ResolvedExpression;
+use jj_lib::revset::RevsetEvaluationError;
 use pollster::FutureExt as _;
 use test_case::test_case;
 use testutils::CommitBuilderExt as _;
@@ -94,6 +101,50 @@ fn is_ancestor(
     descendant_id: &CommitId,
 ) -> bool {
     index.is_ancestor(ancestor_id, descendant_id).unwrap()
+}
+
+#[derive(Clone)]
+struct FailingPositionIndex {
+    inner: DefaultReadonlyIndex,
+    fail_position: GlobalPosition,
+}
+
+impl PositionIndex for FailingPositionIndex {
+    fn num_commits(&self) -> u32 {
+        PositionIndex::num_commits(&self.inner)
+    }
+
+    fn position_by_commit_id(&self, id: &CommitId) -> IndexResult<Option<GlobalPosition>> {
+        self.inner.position_by_commit_id(id)
+    }
+
+    fn entry_by_position(&self, position: GlobalPosition) -> IndexResult<IndexGraphEntry> {
+        if position == self.fail_position {
+            Err(IndexError::Corrupt(
+                "injected graph read failure".to_owned(),
+            ))
+        } else {
+            self.inner.entry_by_position(position)
+        }
+    }
+
+    fn resolve_commit_id_prefix(
+        &self,
+        prefix: &HexPrefix,
+    ) -> IndexResult<PrefixResolution<CommitId>> {
+        PositionIndex::resolve_commit_id_prefix(&self.inner, prefix)
+    }
+
+    fn resolve_change_id_prefix(
+        &self,
+        prefix: &HexPrefix,
+    ) -> IndexResult<PrefixResolution<Vec<GlobalPosition>>> {
+        self.inner.resolve_change_id_prefix(prefix)
+    }
+
+    fn changed_paths(&self, position: GlobalPosition) -> IndexResult<Option<Vec<RepoPathBuf>>> {
+        self.inner.changed_paths(position)
+    }
 }
 
 #[test]
@@ -178,6 +229,86 @@ fn test_index_commits_standard_cases() -> TestResult {
     assert!(is_ancestor(index, commit_a.id(), commit_f.id()));
     assert!(is_ancestor(index, commit_a.id(), commit_g.id()));
     assert!(is_ancestor(index, commit_a.id(), commit_h.id()));
+    Ok(())
+}
+
+#[test]
+fn test_default_position_index_and_graph_algorithms() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let mut tx = repo.start_transaction();
+    let commit_a = write_random_commit(tx.repo_mut());
+    let commit_b = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
+    let commit_c = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
+    let commit_d = write_random_commit_with_parents(tx.repo_mut(), &[&commit_b, &commit_c]);
+    let repo = tx.commit("test").block_on()?;
+    let default_index = as_readonly_index(&repo);
+    let index: &dyn PositionIndex = default_index;
+
+    let position_b = index.position_by_commit_id(commit_b.id())?.unwrap();
+    let entry_b = index.entry_by_position(position_b)?;
+    assert_eq!(entry_b.commit_id, *commit_b.id());
+    assert_eq!(entry_b.change_id, *commit_b.change_id());
+    assert_eq!(entry_b.parent_positions.len(), 1);
+
+    assert!(position_index::is_ancestor(
+        index,
+        commit_a.id(),
+        commit_d.id()
+    )?);
+    assert!(!position_index::is_ancestor(
+        index,
+        commit_b.id(),
+        commit_c.id()
+    )?);
+    assert_eq!(
+        position_index::common_ancestors(
+            index,
+            std::slice::from_ref(commit_b.id()),
+            std::slice::from_ref(commit_c.id()),
+        )?,
+        vec![commit_a.id().clone()]
+    );
+    assert_eq!(
+        position_index::heads(
+            index,
+            &mut [
+                commit_a.id().clone(),
+                commit_b.id().clone(),
+                commit_c.id().clone()
+            ]
+            .iter(),
+        )?,
+        vec![commit_c.id().clone(), commit_b.id().clone()]
+    );
+    assert_eq!(
+        position_index::all_heads(index)?,
+        vec![commit_d.id().clone()]
+    );
+    Ok(())
+}
+
+#[test]
+fn test_position_index_revset_propagates_lazy_read_error() -> TestResult {
+    let test_repo = TestRepo::init();
+    let repo = &test_repo.repo;
+    let default_index = as_readonly_index(repo).clone();
+    let root_id = repo.store().root_commit_id().clone();
+    let fail_position = default_index.position_by_commit_id(&root_id)?.unwrap();
+    let index: Arc<dyn PositionIndex> = Arc::new(FailingPositionIndex {
+        inner: default_index,
+        fail_position,
+    });
+    let expression = ResolvedExpression::Commits(vec![root_id]);
+
+    let revset = position_index::evaluate_revset(&expression, repo.store(), index)?;
+    let error = revset.stream().next().block_on().unwrap().unwrap_err();
+
+    assert_matches!(
+        error,
+        RevsetEvaluationError::Index(IndexError::Corrupt(message))
+            if message == "injected graph read failure"
+    );
     Ok(())
 }
 

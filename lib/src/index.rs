@@ -25,6 +25,7 @@ use thiserror::Error;
 use crate::backend::ChangeId;
 use crate::backend::CommitId;
 use crate::commit::Commit;
+use crate::default_index::IndexDelta;
 use crate::object_id::HexPrefix;
 use crate::object_id::PrefixResolution;
 use crate::operation::Operation;
@@ -55,6 +56,23 @@ pub enum IndexError {
     /// [`Index`] backend.
     #[error("Cannot collect all heads by index of this type")]
     AllHeadsForGcUnsupported,
+    /// A commit expected by a graph operation is not indexed.
+    #[error("Commit {0} is not present in the index")]
+    CommitNotFound(CommitId),
+    /// A global position is outside the index.
+    #[error("Index position {0:?} is outside the index")]
+    InvalidPosition(crate::position_index::GlobalPosition),
+    /// A graph entry points to a position which is not one of its ancestors.
+    #[error("Invalid parent index position {parent:?} for child {child:?}")]
+    InvalidParentPosition {
+        /// Invalid parent position.
+        parent: crate::position_index::GlobalPosition,
+        /// Position of the child entry.
+        child: crate::position_index::GlobalPosition,
+    },
+    /// Indexed data violates a required graph or lookup invariant.
+    #[error("Corrupt index: {0}")]
+    Corrupt(String),
     /// Some other index error.
     #[error(transparent)]
     Other(Box<dyn std::error::Error + Send + Sync>),
@@ -186,6 +204,9 @@ pub trait MutableIndex: Any {
     async fn add_commit(&mut self, commit: &Commit) -> IndexResult<()>;
 
     fn merge_in(&mut self, other: &dyn ReadonlyIndex) -> IndexResult<()>;
+
+    /// Consumes the mutable overlay into storage-neutral logical records.
+    fn into_delta(self: Box<Self>) -> IndexResult<IndexDelta>;
 }
 
 impl dyn MutableIndex {

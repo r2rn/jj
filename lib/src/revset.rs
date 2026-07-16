@@ -120,6 +120,8 @@ pub enum RevsetEvaluationError {
     #[error("Unexpected error from commit backend")]
     Backend(#[from] BackendError),
     #[error(transparent)]
+    Index(#[from] crate::index::IndexError),
+    #[error(transparent)]
     Other(Box<dyn std::error::Error + Send + Sync>),
 }
 
@@ -129,6 +131,7 @@ impl RevsetEvaluationError {
     pub fn into_backend_error(self) -> BackendError {
         match self {
             Self::Backend(err) => err,
+            Self::Index(err) => BackendError::Other(err.into()),
             Self::Other(err) => BackendError::Other(err),
         }
     }

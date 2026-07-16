@@ -81,6 +81,7 @@ pub mod op_heads_store;
 pub mod op_store;
 pub mod op_walk;
 pub mod operation;
+pub mod position_index;
 #[expect(missing_docs)]
 pub mod protos;
 pub mod ref_name;

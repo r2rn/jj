@@ -28,10 +28,11 @@ mod mutable;
 mod readonly;
 mod rev_walk;
 mod rev_walk_queue;
-mod revset_engine;
+pub(crate) mod revset_engine;
 mod revset_graph_iterator;
 mod store;
 
+pub use self::changed_path::collect_changed_paths;
 pub use self::delta::ChangedPathRecord;
 pub use self::delta::IndexCommitRecord;
 pub use self::delta::IndexDelta;
@@ -156,6 +157,38 @@ mod tests {
                     parent_ids: vec![parent_id],
                 },
             ]
+        );
+        assert!(delta.changed_paths.is_empty());
+    }
+
+    #[test]
+    fn mutable_index_delta_excludes_readonly_base() {
+        let temp_dir = new_temp_dir();
+        let mut new_change_id = change_id_generator();
+        let base_id = CommitId::from_hex("111111");
+        let child_id = CommitId::from_hex("222222");
+        let child_change_id = new_change_id();
+        let mut base_segment = MutableCommitIndexSegment::full(TEST_FIELD_LENGTHS);
+        base_segment.add_commit_data(base_id.clone(), new_change_id(), &[]);
+        let base_segment = base_segment.save_in(temp_dir.path()).unwrap();
+        let base_index =
+            DefaultReadonlyIndex::from_segment(base_segment, CompositeChangedPathIndex::null());
+        let mut index = DefaultMutableIndex::incremental(&base_index);
+        index.add_commit_data(
+            child_id.clone(),
+            child_change_id.clone(),
+            std::slice::from_ref(&base_id),
+        );
+
+        let delta = index.into_delta();
+
+        assert_eq!(
+            delta.commits,
+            vec![IndexCommitRecord {
+                commit_id: child_id,
+                change_id: child_change_id,
+                parent_ids: vec![base_id],
+            }]
         );
         assert!(delta.changed_paths.is_empty());
     }

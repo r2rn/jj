@@ -563,7 +563,7 @@ impl CompositeChangedPathIndex {
 
 /// Calculates the parent tree of the given `commit`, and builds a sorted list
 /// of changed paths compared to the parent tree.
-pub(super) async fn collect_changed_paths(
+pub async fn collect_changed_paths(
     index: &dyn Index,
     commit: &Commit,
 ) -> BackendResult<Vec<RepoPathBuf>> {
