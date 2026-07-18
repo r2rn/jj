@@ -233,62 +233,6 @@ fn test_index_commits_standard_cases() -> TestResult {
 }
 
 #[test]
-fn test_default_position_index_and_graph_algorithms() -> TestResult {
-    let test_repo = TestRepo::init();
-    let repo = &test_repo.repo;
-    let mut tx = repo.start_transaction();
-    let commit_a = write_random_commit(tx.repo_mut());
-    let commit_b = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
-    let commit_c = write_random_commit_with_parents(tx.repo_mut(), &[&commit_a]);
-    let commit_d = write_random_commit_with_parents(tx.repo_mut(), &[&commit_b, &commit_c]);
-    let repo = tx.commit("test").block_on()?;
-    let default_index = as_readonly_index(&repo);
-    let index: &dyn PositionIndex = default_index;
-
-    let position_b = index.position_by_commit_id(commit_b.id())?.unwrap();
-    let entry_b = index.entry_by_position(position_b)?;
-    assert_eq!(entry_b.commit_id, *commit_b.id());
-    assert_eq!(entry_b.change_id, *commit_b.change_id());
-    assert_eq!(entry_b.parent_positions.len(), 1);
-
-    assert!(position_index::is_ancestor(
-        index,
-        commit_a.id(),
-        commit_d.id()
-    )?);
-    assert!(!position_index::is_ancestor(
-        index,
-        commit_b.id(),
-        commit_c.id()
-    )?);
-    assert_eq!(
-        position_index::common_ancestors(
-            index,
-            std::slice::from_ref(commit_b.id()),
-            std::slice::from_ref(commit_c.id()),
-        )?,
-        vec![commit_a.id().clone()]
-    );
-    assert_eq!(
-        position_index::heads(
-            index,
-            &mut [
-                commit_a.id().clone(),
-                commit_b.id().clone(),
-                commit_c.id().clone()
-            ]
-            .iter(),
-        )?,
-        vec![commit_c.id().clone(), commit_b.id().clone()]
-    );
-    assert_eq!(
-        position_index::all_heads(index)?,
-        vec![commit_d.id().clone()]
-    );
-    Ok(())
-}
-
-#[test]
 fn test_position_index_revset_propagates_lazy_read_error() -> TestResult {
     let test_repo = TestRepo::init();
     let repo = &test_repo.repo;

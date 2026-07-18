@@ -926,7 +926,7 @@ impl EvaluationContext<'_> {
             ResolvedExpression::Heads(candidates) => {
                 let candidate_set = self.evaluate(candidates)?;
                 let positions = position_index::heads_positions(
-                    index,
+                    index.as_ref(),
                     candidate_set.positions().attach(index).try_collect()?,
                 )?;
                 Ok(Box::new(EagerRevset { positions }))
@@ -953,7 +953,7 @@ impl EvaluationContext<'_> {
                 let positions = if let Some(filter) = filter {
                     let mut filter = self.evaluate_predicate(filter)?.to_predicate_fn();
                     position_index::heads_from_range_and_filter(
-                        index,
+                        index.as_ref(),
                         root_positions,
                         head_positions,
                         parents_range,
@@ -961,7 +961,7 @@ impl EvaluationContext<'_> {
                     )?
                 } else {
                     position_index::heads_from_range_and_filter::<RevsetEvaluationError>(
-                        index,
+                        index.as_ref(),
                         root_positions,
                         head_positions,
                         parents_range,
@@ -1033,7 +1033,7 @@ impl EvaluationContext<'_> {
                 let mut positions = vec![position?];
                 for position in expression_positions_iter {
                     positions = position_index::common_ancestor_positions(
-                        index,
+                        index.as_ref(),
                         positions,
                         vec![position?],
                     )?;
@@ -1190,7 +1190,7 @@ impl EvaluationContext<'_> {
                                 .into());
                             };
                             let mut reachable_set = reachable_set.borrow_mut();
-                            reachable_set.visit_until(index, oldest_position)?;
+                            reachable_set.visit_until(index.as_ref(), oldest_position)?;
                             Ok(positions
                                 .iter()
                                 .filter(|&&position| reachable_set.contains(position))

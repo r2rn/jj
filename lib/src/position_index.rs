@@ -44,10 +44,8 @@ use crate::store::Store;
 pub struct GlobalPosition(pub u32);
 
 impl GlobalPosition {
-    /// Lowest valid global position.
-    pub const MIN: Self = Self(u32::MIN);
-    /// Sentinel greater than every valid global position.
-    pub const MAX: Self = Self(u32::MAX);
+    pub(crate) const MIN: Self = Self(u32::MIN);
+    pub(crate) const MAX: Self = Self(u32::MAX);
 }
 
 /// Owned graph data for one indexed commit.
@@ -67,8 +65,8 @@ pub struct IndexGraphEntry {
 /// graph.
 ///
 /// Entries and changed paths are owned so implementations may release or evict
-/// backing pages as soon as a method returns. Implementations should preserve
-/// the invariant that parents have lower positions than their children.
+/// backing pages as soon as a method returns. Implementations must reject graph
+/// entries whose parents are not lower than their children.
 pub trait PositionIndex: Send + Sync {
     /// Returns the number of indexed commits.
     fn num_commits(&self) -> u32;
@@ -131,43 +129,9 @@ impl<T: PositionIndex + ?Sized> PositionIndex for &T {
     }
 }
 
-impl<T: PositionIndex + ?Sized> PositionIndex for Arc<T> {
-    fn num_commits(&self) -> u32 {
-        T::num_commits(self)
-    }
-
-    fn position_by_commit_id(&self, id: &CommitId) -> IndexResult<Option<GlobalPosition>> {
-        T::position_by_commit_id(self, id)
-    }
-
-    fn entry_by_position(&self, position: GlobalPosition) -> IndexResult<IndexGraphEntry> {
-        T::entry_by_position(self, position)
-    }
-
-    fn resolve_commit_id_prefix(
-        &self,
-        prefix: &HexPrefix,
-    ) -> IndexResult<PrefixResolution<CommitId>> {
-        T::resolve_commit_id_prefix(self, prefix)
-    }
-
-    fn resolve_change_id_prefix(
-        &self,
-        prefix: &HexPrefix,
-    ) -> IndexResult<PrefixResolution<Vec<GlobalPosition>>> {
-        T::resolve_change_id_prefix(self, prefix)
-    }
-
-    fn changed_paths(&self, position: GlobalPosition) -> IndexResult<Option<Vec<RepoPathBuf>>> {
-        T::changed_paths(self, position)
-    }
-}
-
 /// Evaluates a resolved revset with JJ's default position-based revset engine.
 ///
-/// The returned revset owns a cloneable shared index handle; graph and
-/// changed-path read failures are reported lazily as
-/// [`RevsetEvaluationError::Index`].
+/// The returned revset owns a cloneable shared index handle.
 pub fn evaluate_revset(
     expression: &ResolvedExpression,
     store: &Arc<Store>,
@@ -236,7 +200,7 @@ pub fn common_ancestors(
 }
 
 /// Returns best common-ancestor positions in descending order.
-pub fn common_ancestor_positions(
+pub(crate) fn common_ancestor_positions(
     index: &dyn PositionIndex,
     set1: Vec<GlobalPosition>,
     set2: Vec<GlobalPosition>,
@@ -274,21 +238,19 @@ pub fn heads(
 }
 
 /// Returns head positions among `candidates`, sorted in descending order.
-pub fn heads_positions(
+pub(crate) fn heads_positions(
     index: &dyn PositionIndex,
     mut candidates: Vec<GlobalPosition>,
 ) -> IndexResult<Vec<GlobalPosition>> {
     candidates.sort_unstable_by_key(|&position| Reverse(position));
     candidates.dedup();
-    let Some(min_generation) = candidates
-        .iter()
-        .map(|&position| Ok(index.entry_by_position(position)?.generation_number))
-        .collect::<IndexResult<Vec<_>>>()?
-        .into_iter()
-        .min()
-    else {
+    if candidates.is_empty() {
         return Ok(candidates);
-    };
+    }
+    let mut min_generation = u32::MAX;
+    for &position in &candidates {
+        min_generation = min_generation.min(index.entry_by_position(position)?.generation_number);
+    }
 
     let mut parents = BinaryHeap::new();
     let mut heads = Vec::new();
@@ -298,29 +260,34 @@ pub fn heads_positions(
             if entry.generation_number <= min_generation {
                 dedup_pop(&mut parents);
             } else {
-                shift_to_parents_with_entry(&mut parents, parent, &entry)?;
+                shift_to_parents_from_slice(&mut parents, parent, &entry.parent_positions)?;
             }
             if parent == candidate {
                 continue 'outer;
             }
         }
         let entry = index.entry_by_position(candidate)?;
+        validate_parent_positions(candidate, &entry.parent_positions)?;
         parents.extend(entry.parent_positions);
         heads.push(candidate);
     }
     Ok(heads)
 }
 
-/// Returns positions which are heads among all indexed commits.
-pub fn all_head_positions(index: &dyn PositionIndex) -> IndexResult<Vec<GlobalPosition>> {
+fn all_head_positions(index: &dyn PositionIndex) -> IndexResult<Vec<GlobalPosition>> {
     let num_commits = index.num_commits();
-    let mut not_heads = HashSet::new();
+    let mut is_head = vec![true; num_commits as usize];
     for position in (0..num_commits).map(GlobalPosition) {
-        not_heads.extend(index.entry_by_position(position)?.parent_positions);
+        let entry = index.entry_by_position(position)?;
+        validate_parent_positions(position, &entry.parent_positions)?;
+        for parent in entry.parent_positions {
+            is_head[parent.0 as usize] = false;
+        }
     }
-    Ok((0..num_commits)
-        .map(GlobalPosition)
-        .filter(|position| !not_heads.contains(position))
+    Ok(is_head
+        .into_iter()
+        .enumerate()
+        .filter_map(|(position, is_head)| is_head.then_some(GlobalPosition(position as u32)))
         .collect())
 }
 
@@ -332,10 +299,7 @@ pub fn all_heads(index: &dyn PositionIndex) -> IndexResult<Vec<CommitId>> {
         .collect()
 }
 
-/// Finds heads in the position range `roots..heads` while applying `filter`.
-///
-/// The returned positions and filter calls are in descending position order.
-pub fn heads_from_range_and_filter<E>(
+pub(crate) fn heads_from_range_and_filter<E>(
     index: &dyn PositionIndex,
     roots: Vec<GlobalPosition>,
     heads: Vec<GlobalPosition>,
@@ -357,6 +321,7 @@ where
             continue;
         }
         let entry = index.entry_by_position(position)?;
+        validate_parent_positions(position, &entry.parent_positions)?;
         if filter(position)? {
             dedup_pop(&mut wanted_queue);
             unwanted_queue.extend(entry.parent_positions);
@@ -404,17 +369,6 @@ where
     E: From<IndexError>,
 {
     let entry = index.entry_by_position(position)?;
-    shift_to_parents_with_entry(queue, position, &entry)
-}
-
-fn shift_to_parents_with_entry<E>(
-    queue: &mut BinaryHeap<GlobalPosition>,
-    position: GlobalPosition,
-    entry: &IndexGraphEntry,
-) -> Result<(), E>
-where
-    E: From<IndexError>,
-{
     shift_to_parents_from_slice(queue, position, &entry.parent_positions)
 }
 
@@ -452,6 +406,16 @@ where
     }
 }
 
+fn validate_parent_positions<E>(child: GlobalPosition, parents: &[GlobalPosition]) -> Result<(), E>
+where
+    E: From<IndexError>,
+{
+    for &parent in parents {
+        validate_parent_position(parent, child)?;
+    }
+    Ok(())
+}
+
 fn dedup_pop<T: Ord>(heap: &mut BinaryHeap<T>) -> Option<T> {
     let item = heap.pop()?;
     remove_dup(heap, &item);
@@ -475,7 +439,7 @@ fn remove_dup<T: Ord>(heap: &mut BinaryHeap<T>, item: &T) {
 
 fn filter_slice_by_range<'a, T>(slice: &'a [T], range: &Range<u32>) -> &'a [T] {
     let start = (range.start as usize).min(slice.len());
-    let end = (range.end as usize).min(slice.len());
+    let end = (range.end as usize).clamp(start, slice.len());
     &slice[start..end]
 }
 
@@ -484,13 +448,12 @@ fn filter_slice_by_range<'a, T>(slice: &'a [T], range: &Range<u32>) -> &'a [T] {
 /// This is used internally by tree-diff revset predicates and is also useful to
 /// implementations which want the shared graph algorithms without duplicating
 /// the `Index` methods.
-pub struct PositionIndexAdapter {
+pub(crate) struct PositionIndexAdapter {
     index: Arc<dyn PositionIndex>,
 }
 
 impl PositionIndexAdapter {
-    /// Creates an adapter owning a shared index handle.
-    pub fn new(index: Arc<dyn PositionIndex>) -> Self {
+    pub(crate) fn new(index: Arc<dyn PositionIndex>) -> Self {
         Self { index }
     }
 }

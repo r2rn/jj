@@ -449,7 +449,7 @@ impl<'a> RevWalkBuilder<'a> {
         let positions = self
             .ancestors_until_roots(root_positions.iter().copied())
             .collect::<IndexResult<Vec<_>>>()?;
-        let descendants_index = RevWalkDescendantsIndex::build(index, positions)?;
+        let descendants_index = RevWalkDescendantsIndex::build(index.as_ref(), positions)?;
 
         let mut wanted_queue = RevWalkQueue::with_min_pos(Reverse(GlobalCommitPosition::MAX));
         let unwanted_queue = RevWalkQueue::with_min_pos(Reverse(GlobalCommitPosition::MAX));
