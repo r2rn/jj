@@ -22,7 +22,6 @@
 mod bit_set;
 mod changed_path;
 mod composite;
-mod delta;
 mod entry;
 mod mutable;
 mod readonly;
@@ -33,9 +32,6 @@ mod revset_graph_iterator;
 mod store;
 
 pub use self::changed_path::collect_changed_paths;
-pub use self::delta::ChangedPathRecord;
-pub use self::delta::IndexCommitRecord;
-pub use self::delta::IndexDelta;
 pub use self::mutable::DefaultMutableIndex;
 pub use self::readonly::ChangedPathIndexLevelStats;
 pub use self::readonly::CommitIndexLevelStats;
@@ -79,6 +75,8 @@ mod tests {
     use crate::default_index::entry::SmallLocalCommitPositionsVec;
     use crate::default_index::readonly::FieldLengths;
     use crate::index::Index as _;
+    use crate::index::IndexCommitRecord;
+    use crate::index::MutableIndex as _;
     use crate::object_id::HexPrefix;
     use crate::object_id::PrefixResolution;
     use crate::revset::PARENTS_RANGE_FULL;
@@ -141,7 +139,7 @@ mod tests {
             std::slice::from_ref(&parent_id),
         );
 
-        let delta = index.into_delta();
+        let delta = Box::new(index).into_delta().unwrap();
 
         assert_eq!(
             delta.commits,
@@ -180,7 +178,7 @@ mod tests {
             std::slice::from_ref(&base_id),
         );
 
-        let delta = index.into_delta();
+        let delta = Box::new(index).into_delta().unwrap();
 
         assert_eq!(
             delta.commits,

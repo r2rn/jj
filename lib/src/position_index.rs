@@ -18,7 +18,6 @@ use std::cmp::Ordering;
 use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
-use std::mem;
 use std::ops::Range;
 use std::sync::Arc;
 
@@ -260,14 +259,13 @@ pub(crate) fn heads_positions(
             if entry.generation_number <= min_generation {
                 dedup_pop(&mut parents);
             } else {
-                shift_to_parents_from_slice(&mut parents, parent, &entry.parent_positions)?;
+                shift_to_parents_from_slice(&mut parents, &entry.parent_positions);
             }
             if parent == candidate {
                 continue 'outer;
             }
         }
         let entry = index.entry_by_position(candidate)?;
-        validate_parent_positions(candidate, &entry.parent_positions)?;
         parents.extend(entry.parent_positions);
         heads.push(candidate);
     }
@@ -279,7 +277,6 @@ fn all_head_positions(index: &dyn PositionIndex) -> IndexResult<Vec<GlobalPositi
     let mut is_head = vec![true; num_commits as usize];
     for position in (0..num_commits).map(GlobalPosition) {
         let entry = index.entry_by_position(position)?;
-        validate_parent_positions(position, &entry.parent_positions)?;
         for parent in entry.parent_positions {
             is_head[parent.0 as usize] = false;
         }
@@ -321,14 +318,13 @@ where
             continue;
         }
         let entry = index.entry_by_position(position)?;
-        validate_parent_positions(position, &entry.parent_positions)?;
         if filter(position)? {
             dedup_pop(&mut wanted_queue);
             unwanted_queue.extend(entry.parent_positions);
             found_heads.push(position);
         } else {
             let parent_positions = filter_slice_by_range(&entry.parent_positions, parents_range);
-            shift_to_parents_from_slice(&mut wanted_queue, position, parent_positions)?;
+            shift_to_parents_from_slice(&mut wanted_queue, parent_positions);
         }
     }
     Ok(found_heads)
@@ -369,71 +365,23 @@ where
     E: From<IndexError>,
 {
     let entry = index.entry_by_position(position)?;
-    shift_to_parents_from_slice(queue, position, &entry.parent_positions)
+    shift_to_parents_from_slice(queue, &entry.parent_positions);
+    Ok(())
 }
 
-fn shift_to_parents_from_slice<E>(
+fn shift_to_parents_from_slice(
     queue: &mut BinaryHeap<GlobalPosition>,
-    position: GlobalPosition,
     parent_positions: &[GlobalPosition],
-) -> Result<(), E>
-where
-    E: From<IndexError>,
-{
-    let mut parents = parent_positions.iter();
-    if let Some(&parent) = parents.next() {
-        validate_parent_position(parent, position)?;
-        dedup_replace(queue, parent);
-    } else {
-        dedup_pop(queue);
-        return Ok(());
-    }
-    for &parent in parents {
-        validate_parent_position(parent, position)?;
-        queue.push(parent);
-    }
-    Ok(())
+) {
+    dedup_pop(queue);
+    queue.extend(parent_positions.iter().copied());
 }
 
-fn validate_parent_position<E>(parent: GlobalPosition, child: GlobalPosition) -> Result<(), E>
-where
-    E: From<IndexError>,
-{
-    if parent < child {
-        Ok(())
-    } else {
-        Err(IndexError::InvalidParentPosition { parent, child }.into())
-    }
-}
-
-fn validate_parent_positions<E>(child: GlobalPosition, parents: &[GlobalPosition]) -> Result<(), E>
-where
-    E: From<IndexError>,
-{
-    for &parent in parents {
-        validate_parent_position(parent, child)?;
-    }
-    Ok(())
-}
-
-fn dedup_pop<T: Ord>(heap: &mut BinaryHeap<T>) -> Option<T> {
-    let item = heap.pop()?;
-    remove_dup(heap, &item);
-    Some(item)
-}
-
-fn dedup_replace<T: Ord>(heap: &mut BinaryHeap<T>, new_item: T) -> Option<T> {
-    let old_item = {
-        let mut item = heap.peek_mut()?;
-        mem::replace(&mut *item, new_item)
-    };
-    remove_dup(heap, &old_item);
-    Some(old_item)
-}
-
-fn remove_dup<T: Ord>(heap: &mut BinaryHeap<T>, item: &T) {
-    while let Some(entry) = heap.peek_mut().filter(|entry| **entry == *item) {
-        std::collections::binary_heap::PeekMut::pop(entry);
+fn dedup_pop<T: Ord>(heap: &mut BinaryHeap<T>) {
+    if let Some(item) = heap.pop() {
+        while heap.peek().is_some_and(|entry| entry == &item) {
+            heap.pop();
+        }
     }
 }
 

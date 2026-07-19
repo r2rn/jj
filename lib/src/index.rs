@@ -25,7 +25,6 @@ use thiserror::Error;
 use crate::backend::ChangeId;
 use crate::backend::CommitId;
 use crate::commit::Commit;
-use crate::default_index::IndexDelta;
 use crate::object_id::HexPrefix;
 use crate::object_id::PrefixResolution;
 use crate::operation::Operation;
@@ -34,6 +33,36 @@ use crate::revset::ResolvedExpression;
 use crate::revset::Revset;
 use crate::revset::RevsetEvaluationError;
 use crate::store::Store;
+
+/// Logical records added by one mutable-index overlay.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexDelta {
+    /// New commits in parent-before-child topological order.
+    pub commits: Vec<IndexCommitRecord>,
+    /// Optional changed-path data keyed by commit ID. A missing record means
+    /// unavailable; an empty path list means the commit changes no paths.
+    pub changed_paths: Vec<ChangedPathRecord>,
+}
+
+/// A commit graph record independent of persisted index positions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexCommitRecord {
+    /// Content-addressed commit identifier.
+    pub commit_id: CommitId,
+    /// Change identifier carried by the commit.
+    pub change_id: ChangeId,
+    /// Parent commit identifiers.
+    pub parent_ids: Vec<CommitId>,
+}
+
+/// Optional changed-path data associated with a commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangedPathRecord {
+    /// Commit whose changed paths were indexed.
+    pub commit_id: CommitId,
+    /// Sorted repository paths changed by the commit.
+    pub paths: Vec<RepoPathBuf>,
+}
 
 /// Returned by [`IndexStore`] in the event of an error.
 #[derive(Debug, Error)]

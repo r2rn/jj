@@ -40,9 +40,6 @@ use super::composite::CommitIndexSegmentId;
 use super::composite::CompositeCommitIndex;
 use super::composite::CompositeIndex;
 use super::composite::DynCommitIndexSegment;
-use super::delta::ChangedPathRecord;
-use super::delta::IndexCommitRecord;
-use super::delta::IndexDelta;
 use super::entry::GlobalCommitPosition;
 use super::entry::LocalCommitPosition;
 use super::entry::SmallGlobalCommitPositionsVec;
@@ -60,7 +57,10 @@ use crate::file_util::IoResultExt as _;
 use crate::file_util::PathError;
 use crate::file_util::persist_content_addressed_temp_file;
 use crate::index::ChangeIdIndex;
+use crate::index::ChangedPathRecord;
 use crate::index::Index;
+use crate::index::IndexCommitRecord;
+use crate::index::IndexDelta;
 use crate::index::IndexError;
 use crate::index::IndexResult;
 use crate::index::MutableIndex;
@@ -487,12 +487,7 @@ impl DefaultMutableIndex {
         self.0.into_mutable().expect("must have mutable")
     }
 
-    /// Consumes this overlay and returns its storage-neutral logical records.
-    ///
-    /// Parent IDs are resolved before the default index's local positions are
-    /// discarded. The resulting records can be appended against a newer base
-    /// index without preserving this overlay's temporary positions.
-    pub fn into_delta(mut self) -> IndexDelta {
+    fn into_delta(mut self) -> IndexDelta {
         let first_position = self
             .0
             .mutable_commits()
