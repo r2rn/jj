@@ -204,7 +204,11 @@ impl Backend for SecretBackend {
         self.inner.get_copy_records(paths, root, head)
     }
 
-    fn gc(&self, index: &dyn Index, keep_newer: SystemTime) -> BackendResult<()> {
+    fn gc<'a>(
+        &'a self,
+        index: &'a dyn Index,
+        keep_newer: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = BackendResult<()>> + 'a>> {
         self.inner.gc(index, keep_newer)
     }
 }

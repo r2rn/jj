@@ -19,7 +19,6 @@ use itertools::EitherOrBoth;
 use crate::backend::CommitId;
 use crate::index::Index;
 use crate::index::IndexResult;
-use crate::iter_util::fallible_position;
 use crate::merge::Diff;
 use crate::merge::Merge;
 use crate::merge::SameChange;
@@ -105,7 +104,7 @@ fn iter_named_pairs<K: Ord, V1, V2>(
     )
 }
 
-pub fn merge_ref_targets(
+pub async fn merge_ref_targets(
     index: &dyn Index,
     left: &RefTarget,
     base: &RefTarget,
@@ -127,14 +126,14 @@ pub fn merge_ref_targets(
     if let Some(resolved) = merge.resolve_trivial(SameChange::Accept) {
         Ok(RefTarget::resolved(resolved.clone()))
     } else {
-        merge_ref_targets_non_trivial(index, &mut merge)?;
+        merge_ref_targets_non_trivial(index, &mut merge).await?;
         // TODO: Maybe better to try resolve_trivial() again, but the result is
         // unreliable since merge_ref_targets_non_trivial() is order dependent.
         Ok(RefTarget::from_merge(merge))
     }
 }
 
-pub fn merge_remote_refs(
+pub async fn merge_remote_refs(
     index: &dyn Index,
     left: &RemoteRef,
     base: &RemoteRef,
@@ -146,7 +145,7 @@ pub fn merge_remote_refs(
     // or remote target conflicts (since fast-forwardable move can be safely
     // "tracked"), and the conflicts will require user intervention anyway. So
     // there wouldn't be much reason to handle these merges precisely.
-    let target = merge_ref_targets(index, &left.target, &base.target, &right.target)?;
+    let target = merge_ref_targets(index, &left.target, &base.target, &right.target).await?;
     // Merged state shouldn't conflict atm since we only have two states, but if
     // it does, keep the original state. The choice is arbitrary.
     let state = *trivial_merge(&[left.state, base.state, right.state], SameChange::Accept)
@@ -154,17 +153,17 @@ pub fn merge_remote_refs(
     Ok(RemoteRef { target, state })
 }
 
-fn merge_ref_targets_non_trivial(
+async fn merge_ref_targets_non_trivial(
     index: &dyn Index,
     conflict: &mut Merge<Option<CommitId>>,
 ) -> IndexResult<()> {
-    while let Some((remove_index, add_index)) = find_pair_to_remove(index, conflict)? {
+    while let Some((remove_index, add_index)) = find_pair_to_remove(index, conflict).await? {
         conflict.swap_remove(remove_index, add_index);
     }
     Ok(())
 }
 
-fn find_pair_to_remove(
+async fn find_pair_to_remove(
     index: &dyn Index,
     conflict: &Merge<Option<CommitId>>,
 ) -> IndexResult<Option<(usize, usize)>> {
@@ -176,17 +175,18 @@ fn find_pair_to_remove(
             // combination should be somehow weighted?
             let (add_index, add_id) = match (add1, add2) {
                 (Some(id1), Some(id2)) if id1 == id2 => (add_index1, id1),
-                (Some(id1), Some(id2)) if index.is_ancestor(id1, id2)? => (add_index1, id1),
-                (Some(id1), Some(id2)) if index.is_ancestor(id2, id1)? => (add_index2, id2),
+                (Some(id1), Some(id2)) if index.is_ancestor(id1, id2).await? => (add_index1, id1),
+                (Some(id1), Some(id2)) if index.is_ancestor(id2, id1).await? => (add_index2, id2),
                 _ => continue,
             };
-            if let Some(remove_index) =
-                fallible_position(conflict.removes(), |remove| match remove {
-                    Some(id) => index.is_ancestor(id, add_id),
-                    None => Ok(true), // Absent ref can be considered a root
-                })?
-            {
-                return Ok(Some((remove_index, add_index)));
+            for (remove_index, remove) in conflict.removes().enumerate() {
+                let ancestor = match remove {
+                    Some(id) => index.is_ancestor(id, add_id).await?,
+                    None => true, // Absent ref can be considered a root
+                };
+                if ancestor {
+                    return Ok(Some((remove_index, add_index)));
+                }
             }
         }
     }

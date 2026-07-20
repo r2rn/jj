@@ -22,6 +22,7 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use async_trait::async_trait;
 use itertools::Itertools as _;
 use ref_cast::RefCastCustom;
 use ref_cast::ref_cast_custom;
@@ -594,44 +595,56 @@ impl AsCompositeIndex for CompositeIndex {
 }
 
 // In revset engine, we need to convert &CompositeIndex to &dyn Index.
+#[async_trait(?Send)]
 impl Index for CompositeIndex {
-    fn shortest_unique_commit_id_prefix_len(&self, commit_id: &CommitId) -> IndexResult<usize> {
+    async fn shortest_unique_commit_id_prefix_len(
+        &self,
+        commit_id: &CommitId,
+    ) -> IndexResult<usize> {
         Ok(self
             .commits()
             .shortest_unique_commit_id_prefix_len(commit_id))
     }
 
-    fn resolve_commit_id_prefix(
+    async fn resolve_commit_id_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<CommitId>> {
         Ok(self.commits().resolve_commit_id_prefix(prefix))
     }
 
-    fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool> {
+    async fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool> {
         Ok(self.commits().has_id(commit_id))
     }
 
-    fn is_ancestor(&self, ancestor_id: &CommitId, descendant_id: &CommitId) -> IndexResult<bool> {
+    async fn is_ancestor(
+        &self,
+        ancestor_id: &CommitId,
+        descendant_id: &CommitId,
+    ) -> IndexResult<bool> {
         Ok(self.commits().is_ancestor(ancestor_id, descendant_id))
     }
 
-    fn common_ancestors(&self, set1: &[CommitId], set2: &[CommitId]) -> IndexResult<Vec<CommitId>> {
+    async fn common_ancestors(
+        &self,
+        set1: &[CommitId],
+        set2: &[CommitId],
+    ) -> IndexResult<Vec<CommitId>> {
         Ok(self.commits().common_ancestors(set1, set2))
     }
 
-    fn all_heads_for_gc(&self) -> IndexResult<Box<dyn Iterator<Item = CommitId> + '_>> {
+    async fn all_heads_for_gc(&self) -> IndexResult<Box<dyn Iterator<Item = CommitId> + '_>> {
         Ok(Box::new(self.commits().all_heads()))
     }
 
-    fn heads(
+    async fn heads(
         &self,
         candidate_ids: &mut dyn Iterator<Item = &CommitId>,
     ) -> IndexResult<Vec<CommitId>> {
         Ok(self.commits().heads(candidate_ids))
     }
 
-    fn changed_paths_in_commit(
+    async fn changed_paths_in_commit(
         &self,
         commit_id: &CommitId,
     ) -> IndexResult<Option<Box<dyn Iterator<Item = RepoPathBuf> + '_>>> {
@@ -645,7 +658,7 @@ impl Index for CompositeIndex {
         Ok(Some(Box::new(paths.map(|path| path.to_owned()))))
     }
 
-    fn evaluate_revset(
+    async fn evaluate_revset(
         &self,
         expression: &ResolvedExpression,
         store: &Arc<Store>,
@@ -674,13 +687,14 @@ impl<I: AsCompositeIndex> ChangeIdIndexImpl<I> {
     }
 }
 
+#[async_trait(?Send)]
 impl<I: AsCompositeIndex + Send + Sync> ChangeIdIndex for ChangeIdIndexImpl<I> {
     // Resolves change ID prefix among all IDs.
     //
     // If `SingleMatch` is returned, there is at least one commit with the given
     // change ID (either visible or hidden). `AmbiguousMatch` may be returned even
     // if the prefix is unique within the visible entries.
-    fn resolve_prefix(
+    async fn resolve_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<ResolvedChangeTargets>> {
@@ -699,7 +713,7 @@ impl<I: AsCompositeIndex + Send + Sync> ChangeIdIndex for ChangeIdIndexImpl<I> {
     // The returned length is usually a few digits longer than the minimum
     // length necessary to disambiguate within the visible entries since hidden
     // entries are also considered when determining the prefix length.
-    fn shortest_unique_prefix_len(&self, change_id: &ChangeId) -> IndexResult<usize> {
+    async fn shortest_unique_prefix_len(&self, change_id: &ChangeId) -> IndexResult<usize> {
         let index = self.index.as_composite().commits();
         Ok(index.shortest_unique_change_id_prefix_len(change_id))
     }

@@ -62,6 +62,6 @@ pub async fn cmd_util_gc(
     repo.op_store()
         .gc(slice::from_ref(repo.op_id()), keep_newer)
         .await?;
-    repo.store().gc(repo.index(), keep_newer)?;
+    repo.store().gc(repo.index(), keep_newer).await?;
     Ok(())
 }

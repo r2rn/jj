@@ -148,7 +148,8 @@ fn test_find_recursive_merge_commits() -> TestResult {
         tx.repo().store(),
         tx.repo().index(),
         vec![commit_d.id().clone(), commit_e.id().clone()],
-    )?;
+    )
+    .block_on()?;
 
     assert_eq!(
         commit_id_merge,

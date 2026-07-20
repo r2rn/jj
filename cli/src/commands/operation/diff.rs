@@ -314,7 +314,8 @@ pub async fn show_op_diff(
         && op_commits_diff.has_changes()
     {
         let revset = RevsetExpression::commits(op_commits_diff.changes.keys().cloned().collect())
-            .evaluate(current_repo)?;
+            .evaluate(current_repo)
+            .await?;
         writeln!(formatter)?;
         with_content_format
             .write(formatter, async |formatter| {
@@ -771,11 +772,13 @@ async fn compute_operation_commits_diff(
 
     let elided_newly_visible_estimate = newly_visible_expr
         .minus(&to_op_diff_changes_expr)
-        .evaluate(repo)?
+        .evaluate(repo)
+        .await?
         .count_estimate()?;
     let elided_newly_hidden_estimate = newly_hidden_expr
         .minus(&from_op_diff_changes_expr)
-        .evaluate(repo)?
+        .evaluate(repo)
+        .await?
         .count_estimate()?;
 
     // Collect hidden commits to find abandoned/rewritten changes.
@@ -783,7 +786,8 @@ async fn compute_operation_commits_diff(
     let mut abandoned_commits: HashSet<CommitId> = HashSet::new();
     let newly_hidden = newly_hidden_expr
         .intersection(&from_op_diff_changes_expr)
-        .evaluate(repo)?;
+        .evaluate(repo)
+        .await?;
     let mut newly_hidden_stream = newly_hidden.commit_change_ids();
     while let Some((commit_id, change_id)) = newly_hidden_stream.try_next().await? {
         // Just pick one if diverged. Divergent commits shouldn't be considered
@@ -798,7 +802,8 @@ async fn compute_operation_commits_diff(
     let mut changes: HashMap<CommitId, ModifiedChange> = HashMap::new();
     let newly_visible = newly_visible_expr
         .intersection(&to_op_diff_changes_expr)
-        .evaluate(repo)?;
+        .evaluate(repo)
+        .await?;
     let mut newly_visible_stream = newly_visible.commit_change_ids();
     while let Some((commit_id, change_id)) = newly_visible_stream.try_next().await? {
         let predecessor_ids = if let Some(ids) = predecessor_commits.get(&commit_id) {

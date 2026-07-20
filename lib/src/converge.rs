@@ -126,7 +126,7 @@ pub async fn find_divergent_changes(
     revset_expression: Arc<ResolvedRevsetExpression>,
 ) -> Result<CommitsByChangeId, RevsetEvaluationError> {
     let mut result = CommitsByChangeId::new();
-    let mut stream = revset_expression.evaluate(repo.as_ref())?.stream();
+    let mut stream = revset_expression.evaluate(repo.as_ref()).await?.stream();
     while let Some(commit_id) = stream.try_next().await? {
         let commit = repo.store().get_commit_async(&commit_id).await?;
         result
@@ -529,7 +529,7 @@ async fn converge_trees(
         .await
         .map_err(|e| ConvergeError::Other(e.into()))?;
     let dominator_producer =
-        get_value_producer(truncated_evolution_graph, &dominator_value, &value_cache)?;
+        get_value_producer(truncated_evolution_graph, &dominator_value, &value_cache).await?;
 
     let base_commit = repo.store().get_commit_async(&dominator_producer).await?;
     let rebased_resolved_trees = Arc::try_unwrap(rebased_resolved_trees)
@@ -612,7 +612,7 @@ where
         .find_dominator_value_with_value_cache(divergent_commits.clone(), &mut value_cache)
         .await
         .map_err(|e| ConvergeError::Other(e.into()))?;
-    let dominator_producer = get_value_producer(graph, &dominator_value, &value_cache)?;
+    let dominator_producer = get_value_producer(graph, &dominator_value, &value_cache).await?;
 
     let mut merge_builder = MergeBuilder::default();
     // ADD
@@ -627,7 +627,7 @@ where
 
 /// Returns a commit that produces a given value (e.g. finds a commit that
 /// produces a given description). The value must be present in value_cache.
-fn get_value_producer<T, VF>(
+async fn get_value_producer<T, VF>(
     truncated_evolution_graph: &TruncatedEvolutionGraph,
     value: &Rc<T>,
     value_cache: &ValueCache<CommitId, T, VF>,
@@ -653,7 +653,8 @@ where
 
     let resolved_change_targets = truncated_evolution_graph
         .repo()
-        .resolve_change_id(truncated_evolution_graph.change_id())?;
+        .resolve_change_id(truncated_evolution_graph.change_id())
+        .await?;
     let input_position: HashMap<&CommitId, usize> = truncated_evolution_graph
         .divergent_commit_ids()
         .iter()
@@ -711,7 +712,7 @@ pub async fn remove_descendants(
     }
     let revset_expression = Arc::new(RevsetExpression::Commits(commit_ids.to_vec())).roots();
     let mut result = HashSet::with_capacity(commit_ids.len());
-    let mut stream = revset_expression.evaluate(repo.deref())?.stream();
+    let mut stream = revset_expression.evaluate(repo.deref()).await?.stream();
     while let Some(commit_id) = stream.try_next().await? {
         result.insert(commit_id);
     }

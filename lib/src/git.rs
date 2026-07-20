@@ -650,14 +650,12 @@ async fn import_refs_inner(
     // changed_git_refs aren't respected because changed_remote_bookmarks/tags
     // should include all heads that will become reachable in jj.
     let index = mut_repo.index();
-    let missing_head_ids: Vec<&CommitId> = new_referenced_heads
-        .iter()
-        .filter_map(|id| match index.has_id(id) {
-            Ok(false) => Some(Ok(id)),
-            Ok(true) => None,
-            Err(e) => Some(Err(e)),
-        })
-        .try_collect()?;
+    let mut missing_head_ids = Vec::new();
+    for id in &new_referenced_heads {
+        if !index.has_id(id).await? {
+            missing_head_ids.push(id);
+        }
+    }
     let heads_imported = git_backend.import_head_commits(missing_head_ids).is_ok();
 
     // Import new remote heads
@@ -668,7 +666,7 @@ async fn import_refs_inner(
             err,
         };
         // If bulk-import failed, try again to find bad head or ref.
-        if !heads_imported && !index.has_id(id)? {
+        if !heads_imported && !index.has_id(id).await? {
             git_backend
                 .import_head_commits([id])
                 .map_err(missing_ref_err)?;
@@ -704,7 +702,9 @@ async fn import_refs_inner(
             },
         };
         if new_remote_ref.is_tracked() {
-            mut_repo.merge_local_bookmark(symbol.name, base_target, &new_remote_ref.target)?;
+            mut_repo
+                .merge_local_bookmark(symbol.name, base_target, &new_remote_ref.target)
+                .await?;
         }
         // Remote-tracking branch is the last known state of the branch in the remote.
         // It shouldn't diverge even if we had inconsistent view.
@@ -722,7 +722,9 @@ async fn import_refs_inner(
             },
         };
         if new_remote_ref.is_tracked() {
-            mut_repo.merge_local_tag(symbol.name, base_target, &new_remote_ref.target)?;
+            mut_repo
+                .merge_local_tag(symbol.name, base_target, &new_remote_ref.target)
+                .await?;
         }
         // Remote-tracking tag is the last known state of the tag in the remote.
         // It shouldn't diverge even if we had inconsistent view.
@@ -783,7 +785,8 @@ async fn abandon_unreachable_commits(
         // Don't include already-abandoned commits in GitImportStats
         .intersection(&RevsetExpression::visible_heads().ancestors());
     let abandoned_commits: Vec<_> = abandoned_expression
-        .evaluate(mut_repo)?
+        .evaluate(mut_repo)
+        .await?
         .stream()
         .commits(mut_repo.store())
         .try_collect()
@@ -813,7 +816,7 @@ async fn record_synthetic_predecessors(
 ) -> Result<HashSet<CommitId>, GitImportError> {
     let build_change_to_commit_ids_map = async |expr: Arc<ResolvedRevsetExpression>| {
         let mut change_to_commit_ids: HashMap<ChangeId, Vec<CommitId>> = HashMap::new();
-        let mut stream = expr.evaluate(mut_repo)?.commit_change_ids();
+        let mut stream = expr.evaluate(mut_repo).await?.commit_change_ids();
         while let Some((commit_id, change_id)) = stream.try_next().await? {
             let commit_ids = change_to_commit_ids.entry(change_id).or_default();
             commit_ids.push(commit_id);
@@ -831,7 +834,8 @@ async fn record_synthetic_predecessors(
         new_referenced_heads
             .range(old_referenced_heads)
             .intersection(&old_visible_heads.ancestors())
-            .evaluate(mut_repo)?
+            .evaluate(mut_repo)
+            .await?
             .stream()
             .try_collect()
             .await?
@@ -1180,7 +1184,7 @@ pub async fn import_head(mut_repo: &mut MutableRepo) -> Result<(), GitImportErro
     // Import new head
     if let Some(head_id) = &new_git_head_id {
         let index = mut_repo.index();
-        if !index.has_id(head_id)? {
+        if !index.has_id(head_id).await? {
             git_backend.import_head_commits([head_id]).map_err(|err| {
                 GitImportError::MissingHeadTarget {
                     id: head_id.clone(),

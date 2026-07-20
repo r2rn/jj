@@ -88,7 +88,7 @@ pub async fn cmd_debug_revset(
     writeln!(ui.stdout(), "{backend_expression:#?}")?;
     writeln!(ui.stdout())?;
 
-    let revset = expression.evaluate_unoptimized(repo)?;
+    let revset = expression.evaluate_unoptimized(repo).await?;
     writeln!(ui.stdout(), "-- Evaluated:")?;
     writeln!(ui.stdout(), "{revset:#?}")?;
     writeln!(ui.stdout())?;

@@ -50,6 +50,7 @@ use jj_lib::revset::UserRevsetExpression;
 use jj_lib::settings::RemoteSettingsMap;
 use jj_lib::str_util::StringExpression;
 use jj_lib::str_util::StringMatcher;
+use pollster::FutureExt as _;
 use thiserror::Error;
 
 use crate::command_error::CommandError;
@@ -121,6 +122,7 @@ impl<'repo> RevsetExpressionEvaluator<'repo> {
         self.resolve()
             .map_err(UserRevsetEvaluationError::Resolution)?
             .evaluate(self.repo)
+            .block_on()
             .map_err(UserRevsetEvaluationError::Evaluation)
     }
 

@@ -72,6 +72,7 @@ impl MostDigitsInId {
         *self.count.get_or_init(|| {
             RevsetExpression::all()
                 .evaluate(repo)
+                .block_on()
                 .unwrap()
                 .stream()
                 .try_collect::<Vec<_>>()
@@ -102,6 +103,7 @@ impl PartialSymbolResolver for TheDigitestResolver {
 
         Ok(RevsetExpression::all()
             .evaluate(repo)
+            .block_on()
             .map_err(|err| RevsetResolutionError::Other(err.into()))?
             .stream()
             .try_collect::<Vec<_>>()

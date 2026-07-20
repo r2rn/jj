@@ -347,8 +347,12 @@ impl Backend for SimpleBackend {
         Ok(stream::empty().boxed())
     }
 
-    fn gc(&self, _index: &dyn Index, _keep_newer: SystemTime) -> BackendResult<()> {
-        Ok(())
+    fn gc<'a>(
+        &'a self,
+        _index: &'a dyn Index,
+        _keep_newer: SystemTime,
+    ) -> Pin<Box<dyn Future<Output = BackendResult<()>> + 'a>> {
+        Box::pin(async { Ok(()) })
     }
 }
 

@@ -213,7 +213,8 @@ pub(crate) async fn cmd_fix(
 
     let commits: Vec<Commit> = target_expr
         .descendants()
-        .evaluate(repo.as_ref())?
+        .evaluate(repo.as_ref())
+        .await?
         .stream()
         .commits(repo.store())
         .try_collect()

@@ -109,7 +109,8 @@ pub(crate) async fn cmd_arrange(
     let gaps_revset = target_expression
         .connected()
         .minus(&target_expression)
-        .evaluate(repo.as_ref())?;
+        .evaluate(repo.as_ref())
+        .await?;
     if let Some(commit_id) = gaps_revset.stream().next().await {
         return Err(
             user_error("Cannot arrange revset with gaps in.").hinted(format!(
@@ -122,14 +123,15 @@ pub(crate) async fn cmd_arrange(
     let children_revset = target_expression
         .children()
         .minus(&target_expression)
-        .evaluate(repo.as_ref())?;
+        .evaluate(repo.as_ref())
+        .await?;
     let external_children: Vec<_> = children_revset
         .stream()
         .commits(repo.store())
         .try_collect()
         .await?;
 
-    let revset = target_expression.evaluate(repo.as_ref())?;
+    let revset = target_expression.evaluate(repo.as_ref()).await?;
     let commits: Vec<Commit> = revset.stream().commits(repo.store()).try_collect().await?;
     if commits.is_empty() {
         writeln!(ui.status(), "No revisions to arrange.")?;
