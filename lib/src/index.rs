@@ -34,6 +34,36 @@ use crate::revset::Revset;
 use crate::revset::RevsetEvaluationError;
 use crate::store::Store;
 
+/// Logical records added by one mutable-index overlay.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct IndexDelta {
+    /// New commits in parent-before-child topological order.
+    pub commits: Vec<IndexCommitRecord>,
+    /// Optional changed-path data keyed by commit ID. A missing record means
+    /// unavailable; an empty path list means the commit changes no paths.
+    pub changed_paths: Vec<ChangedPathRecord>,
+}
+
+/// A commit graph record independent of persisted index positions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndexCommitRecord {
+    /// Content-addressed commit identifier.
+    pub commit_id: CommitId,
+    /// Change identifier carried by the commit.
+    pub change_id: ChangeId,
+    /// Parent commit identifiers.
+    pub parent_ids: Vec<CommitId>,
+}
+
+/// Optional changed-path data associated with a commit.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ChangedPathRecord {
+    /// Commit whose changed paths were indexed.
+    pub commit_id: CommitId,
+    /// Sorted repository paths changed by the commit.
+    pub paths: Vec<RepoPathBuf>,
+}
+
 /// Returned by [`IndexStore`] in the event of an error.
 #[derive(Debug, Error)]
 pub enum IndexStoreError {
@@ -55,6 +85,23 @@ pub enum IndexError {
     /// [`Index`] backend.
     #[error("Cannot collect all heads by index of this type")]
     AllHeadsForGcUnsupported,
+    /// A commit expected by a graph operation is not indexed.
+    #[error("Commit {0} is not present in the index")]
+    CommitNotFound(CommitId),
+    /// A global position is outside the index.
+    #[error("Index position {0:?} is outside the index")]
+    InvalidPosition(crate::position_index::GlobalPosition),
+    /// A graph entry points to a position which is not one of its ancestors.
+    #[error("Invalid parent index position {parent:?} for child {child:?}")]
+    InvalidParentPosition {
+        /// Invalid parent position.
+        parent: crate::position_index::GlobalPosition,
+        /// Position of the child entry.
+        child: crate::position_index::GlobalPosition,
+    },
+    /// Indexed data violates a required graph or lookup invariant.
+    #[error("Corrupt index: {0}")]
+    Corrupt(String),
     /// Some other index error.
     #[error(transparent)]
     Other(Box<dyn std::error::Error + Send + Sync>),
@@ -186,6 +233,9 @@ pub trait MutableIndex: Any {
     async fn add_commit(&mut self, commit: &Commit) -> IndexResult<()>;
 
     fn merge_in(&mut self, other: &dyn ReadonlyIndex) -> IndexResult<()>;
+
+    /// Consumes the mutable overlay into storage-neutral logical records.
+    fn into_delta(self: Box<Self>) -> IndexResult<IndexDelta>;
 }
 
 impl dyn MutableIndex {

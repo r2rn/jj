@@ -18,7 +18,6 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::collections::HashSet;
 use std::collections::hash_map::HashMap;
-use std::convert::Infallible;
 use std::fmt;
 use std::iter;
 use std::ops::Range;
@@ -31,8 +30,6 @@ use futures::stream::LocalBoxStream;
 use itertools::Itertools as _;
 use pollster::FutureExt as _;
 
-use super::composite::AsCompositeIndex;
-use super::composite::CompositeIndex;
 use super::entry::GlobalCommitPosition;
 use super::rev_walk::EagerRevWalk;
 use super::rev_walk::PeekableRevWalk;
@@ -52,13 +49,16 @@ use crate::diff::ContentDiff;
 use crate::diff::DiffHunkKind;
 use crate::files;
 use crate::graph::GraphNode;
+use crate::index::IndexError;
 use crate::matchers::FilesMatcher;
 use crate::matchers::Matcher;
 use crate::matchers::Visit;
 use crate::merge::Merge;
 use crate::object_id::HexPrefix;
-use crate::object_id::ObjectId as _;
 use crate::object_id::PrefixResolution;
+use crate::position_index;
+use crate::position_index::PositionIndex;
+use crate::position_index::PositionIndexAdapter;
 use crate::repo_path::RepoPath;
 use crate::revset::DiffMatchSide;
 use crate::revset::GENERATION_RANGE_FULL;
@@ -76,10 +76,12 @@ use crate::tree_merge::resolve_file_values;
 use crate::union_find;
 
 type BoxedPredicateFn<'a> = Box<
-    dyn FnMut(&CompositeIndex, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError> + 'a,
+    dyn FnMut(&Arc<dyn PositionIndex>, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError>
+        + 'a,
 >;
 pub(super) type BoxedRevWalk<'a> = Box<
-    dyn RevWalk<CompositeIndex, Item = Result<GlobalCommitPosition, RevsetEvaluationError>> + 'a,
+    dyn RevWalk<Arc<dyn PositionIndex>, Item = Result<GlobalCommitPosition, RevsetEvaluationError>>
+        + 'a,
 >;
 
 trait ToPredicateFn: fmt::Debug {
@@ -116,34 +118,34 @@ impl<T: InternalRevset + ?Sized> InternalRevset for Box<T> {
     }
 }
 
-pub(super) struct RevsetImpl<I> {
+pub(crate) struct RevsetImpl {
     inner: Box<dyn InternalRevset>,
-    index: I,
+    index: Arc<dyn PositionIndex>,
 }
 
-impl<I: AsCompositeIndex + Clone> RevsetImpl<I> {
-    fn new(inner: Box<dyn InternalRevset>, index: I) -> Self {
+impl RevsetImpl {
+    fn new(inner: Box<dyn InternalRevset>, index: Arc<dyn PositionIndex>) -> Self {
         Self { inner, index }
     }
 
     fn positions(
         &self,
     ) -> impl Iterator<Item = Result<GlobalCommitPosition, RevsetEvaluationError>> {
-        self.inner.positions().attach(self.index.as_composite())
+        self.inner.positions().attach(&self.index)
     }
 
     pub fn iter_graph_impl(
         &self,
         skip_transitive_edges: bool,
-    ) -> impl Iterator<Item = Result<GraphNode<CommitId>, RevsetEvaluationError>> + use<I> {
+    ) -> impl Iterator<Item = Result<GraphNode<CommitId>, RevsetEvaluationError>> + use<> {
         let index = self.index.clone();
         let walk = self.inner.positions();
         let mut graph_walk = RevsetGraphWalk::new(walk, skip_transitive_edges);
-        iter::from_fn(move || graph_walk.next(index.as_composite()))
+        iter::from_fn(move || graph_walk.next(&index))
     }
 }
 
-impl<I> fmt::Debug for RevsetImpl<I> {
+impl fmt::Debug for RevsetImpl {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RevsetImpl")
             .field("inner", &self.inner)
@@ -151,7 +153,7 @@ impl<I> fmt::Debug for RevsetImpl<I> {
     }
 }
 
-impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
+impl Revset for RevsetImpl {
     fn stream<'a>(&self) -> LocalBoxStream<'a, Result<CommitId, RevsetEvaluationError>>
     where
         Self: 'a,
@@ -160,8 +162,8 @@ impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
         let mut walk = self
             .inner
             .positions()
-            .map(|index, pos| Ok(index.commits().entry_by_pos(pos?).commit_id()));
-        futures::stream::iter(iter::from_fn(move || walk.next(index.as_composite()))).boxed_local()
+            .map(|index, pos| Ok(index.entry_by_position(pos?)?.commit_id));
+        futures::stream::iter(iter::from_fn(move || walk.next(&index))).boxed_local()
     }
 
     fn commit_change_ids<'a>(
@@ -172,10 +174,10 @@ impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
     {
         let index = self.index.clone();
         let mut walk = self.inner.positions().map(|index, pos| {
-            let entry = index.commits().entry_by_pos(pos?);
-            Ok((entry.commit_id(), entry.change_id()))
+            let entry = index.entry_by_position(pos?)?;
+            Ok((entry.commit_id, entry.change_id))
         });
-        futures::stream::iter(iter::from_fn(move || walk.next(index.as_composite()))).boxed_local()
+        futures::stream::iter(iter::from_fn(move || walk.next(&index))).boxed_local()
     }
 
     fn stream_graph<'a>(
@@ -222,13 +224,13 @@ impl<I: AsCompositeIndex + Clone> Revset for RevsetImpl<I> {
 }
 
 /// Incrementally consumes `RevWalk` of the revset collecting positions.
-struct PositionsAccumulator<'a, I> {
-    index: I,
+struct PositionsAccumulator<'a> {
+    index: Arc<dyn PositionIndex>,
     inner: RefCell<PositionsAccumulatorInner<'a>>,
 }
 
-impl<'a, I: AsCompositeIndex> PositionsAccumulator<'a, I> {
-    fn new(index: I, walk: BoxedRevWalk<'a>) -> Self {
+impl<'a> PositionsAccumulator<'a> {
+    fn new(index: Arc<dyn PositionIndex>, walk: BoxedRevWalk<'a>) -> Self {
         let inner = RefCell::new(PositionsAccumulatorInner {
             walk,
             consumed_positions: Vec::new(),
@@ -238,8 +240,8 @@ impl<'a, I: AsCompositeIndex> PositionsAccumulator<'a, I> {
 
     /// Checks whether the commit is in the revset.
     fn contains(&self, commit_id: &CommitId) -> Result<bool, RevsetEvaluationError> {
-        let index = self.index.as_composite();
-        let Some(position) = index.commits().commit_id_to_pos(commit_id) else {
+        let index = &self.index;
+        let Some(position) = index.position_by_commit_id(commit_id)? else {
             return Ok(false);
         };
 
@@ -268,7 +270,7 @@ impl PositionsAccumulatorInner<'_> {
     /// Consumes `RevWalk` to a desired position but not deeper.
     fn consume_to(
         &mut self,
-        index: &CompositeIndex,
+        index: &Arc<dyn PositionIndex>,
         desired_position: GlobalCommitPosition,
     ) -> Result<(), RevsetEvaluationError> {
         let last_position = self.consumed_positions.last();
@@ -315,11 +317,11 @@ impl ToPredicateFn for EagerRevset {
         Self: 'a,
     {
         let walk = EagerRevWalk::new(self.positions.clone().into_iter());
-        predicate_fn_from_rev_walk(walk)
+        predicate_fn_from_rev_walk(walk.map(|_index, pos| Ok::<_, IndexError>(pos)))
     }
 }
 
-/// Adapter for infallible `RevWalk` of `GlobalCommitPosition`s.
+/// Adapter for a fallible graph walk over global positions.
 struct RevWalkRevset<W> {
     walk: W,
 }
@@ -332,19 +334,19 @@ impl<W> fmt::Debug for RevWalkRevset<W> {
 
 impl<W> InternalRevset for RevWalkRevset<W>
 where
-    W: RevWalk<CompositeIndex, Item = GlobalCommitPosition> + Clone,
+    W: RevWalk<Arc<dyn PositionIndex>, Item = Result<GlobalCommitPosition, IndexError>> + Clone,
 {
     fn positions<'a>(&self) -> BoxedRevWalk<'a>
     where
         Self: 'a,
     {
-        Box::new(self.walk.clone().map(|_index, pos| Ok(pos)))
+        Box::new(self.walk.clone().map(|_index, pos| pos.map_err(Into::into)))
     }
 }
 
 impl<W> ToPredicateFn for RevWalkRevset<W>
 where
-    W: RevWalk<CompositeIndex, Item = GlobalCommitPosition> + Clone,
+    W: RevWalk<Arc<dyn PositionIndex>, Item = Result<GlobalCommitPosition, IndexError>> + Clone,
 {
     fn to_predicate_fn<'a>(&self) -> BoxedPredicateFn<'a>
     where
@@ -356,14 +358,30 @@ where
 
 fn predicate_fn_from_rev_walk<'a, W>(walk: W) -> BoxedPredicateFn<'a>
 where
-    W: RevWalk<CompositeIndex, Item = GlobalCommitPosition> + 'a,
+    W: RevWalk<Arc<dyn PositionIndex>, Item = Result<GlobalCommitPosition, IndexError>> + 'a,
 {
     let mut walk = walk.peekable();
     Box::new(move |index, entry_pos| {
-        while walk.next_if(index, |&pos| pos > entry_pos).is_some() {
-            continue;
+        loop {
+            match walk.peek(index) {
+                Some(Ok(position)) if *position > entry_pos => {
+                    walk.next(index);
+                }
+                Some(Err(_)) => {
+                    let Err(err) = walk.next(index).unwrap() else {
+                        unreachable!();
+                    };
+                    return Err(err.into());
+                }
+                _ => break,
+            }
         }
-        Ok(walk.next_if(index, |&pos| pos == entry_pos).is_some())
+        if matches!(walk.peek(index), Some(Ok(position)) if *position == entry_pos) {
+            walk.next(index);
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     })
 }
 
@@ -720,14 +738,14 @@ where
     }
 }
 
-pub(super) fn evaluate<I: AsCompositeIndex + Clone>(
+pub(crate) fn evaluate(
     expression: &ResolvedExpression,
     store: &Arc<Store>,
-    index: I,
-) -> Result<RevsetImpl<I>, RevsetEvaluationError> {
+    index: Arc<dyn PositionIndex>,
+) -> Result<RevsetImpl, RevsetEvaluationError> {
     let context = EvaluationContext {
         store: store.clone(),
-        index: index.as_composite(),
+        index: &index,
     };
     let internal_revset = context.evaluate(expression)?;
     Ok(RevsetImpl::new(internal_revset, index))
@@ -735,7 +753,7 @@ pub(super) fn evaluate<I: AsCompositeIndex + Clone>(
 
 struct EvaluationContext<'index> {
     store: Arc<Store>,
-    index: &'index CompositeIndex,
+    index: &'index Arc<dyn PositionIndex>,
 }
 
 fn to_u32_generation_range(range: &Range<u64>) -> Result<Range<u32>, RevsetEvaluationError> {
@@ -831,9 +849,8 @@ impl EvaluationContext<'_> {
                     let candidates = RevWalkRevset { walk };
                     let predicate = as_pure_predicate_fn(move |index, pos| {
                         Ok(index
-                            .commits()
-                            .entry_by_pos(pos)
-                            .parent_positions()
+                            .entry_by_position(pos)?
+                            .parent_positions
                             .iter()
                             .any(|parent_pos| root_positions.contains(parent_pos)))
                     });
@@ -844,22 +861,22 @@ impl EvaluationContext<'_> {
                         predicate,
                     }))
                 } else if generation_from_roots == &GENERATION_RANGE_FULL {
-                    let mut positions = builder
-                        .descendants(root_positions.try_collect()?)
-                        .collect_vec();
+                    let mut positions: Vec<GlobalCommitPosition> = builder
+                        .descendants(root_positions.try_collect()?)?
+                        .try_collect()?;
                     positions.reverse();
                     Ok(Box::new(EagerRevset { positions }))
                 } else {
                     // For small generation range, it might be better to build a reachable map
                     // with generation bit set, which can be calculated incrementally from roots:
                     //   reachable[pos] = (reachable[parent_pos] | ...) << 1
-                    let mut positions = builder
+                    let mut positions: Vec<GlobalCommitPosition> = builder
                         .descendants_filtered_by_generation(
                             root_positions.try_collect()?,
                             to_u32_generation_range(generation_from_roots)?,
-                        )
-                        .map(|Reverse(pos)| pos)
-                        .collect_vec();
+                        )?
+                        .map(|result| result.map(|Reverse(pos)| pos))
+                        .try_collect()?;
                     positions.reverse();
                     Ok(Box::new(EagerRevset { positions }))
                 }
@@ -872,7 +889,7 @@ impl EvaluationContext<'_> {
                 let domain_vec: Vec<_> = domain_revset.positions().attach(index).try_collect()?;
                 let domain_set: HashSet<_> = domain_vec.iter().copied().collect();
                 for pos in &domain_set {
-                    for parent_pos in index.commits().entry_by_pos(*pos).parent_positions() {
+                    for parent_pos in index.entry_by_position(*pos)?.parent_positions {
                         if domain_set.contains(&parent_pos) {
                             sets.union(*pos, parent_pos);
                         }
@@ -908,9 +925,10 @@ impl EvaluationContext<'_> {
             }
             ResolvedExpression::Heads(candidates) => {
                 let candidate_set = self.evaluate(candidates)?;
-                let positions = index
-                    .commits()
-                    .heads_pos(candidate_set.positions().attach(index).try_collect()?);
+                let positions = position_index::heads_positions(
+                    index.as_ref(),
+                    candidate_set.positions().attach(index).try_collect()?,
+                )?;
                 Ok(Box::new(EagerRevset { positions }))
             }
             ResolvedExpression::HeadsRange {
@@ -934,41 +952,46 @@ impl EvaluationContext<'_> {
                 .try_collect()?;
                 let positions = if let Some(filter) = filter {
                     let mut filter = self.evaluate_predicate(filter)?.to_predicate_fn();
-                    index.commits().heads_from_range_and_filter(
+                    position_index::heads_from_range_and_filter(
+                        index.as_ref(),
                         root_positions,
                         head_positions,
                         parents_range,
                         |pos| filter(index, pos),
                     )?
                 } else {
-                    let Ok(positions) = index.commits().heads_from_range_and_filter::<Infallible>(
+                    position_index::heads_from_range_and_filter::<RevsetEvaluationError>(
+                        index.as_ref(),
                         root_positions,
                         head_positions,
                         parents_range,
                         |_| Ok(true),
-                    );
-                    positions
+                    )?
                 };
                 Ok(Box::new(EagerRevset { positions }))
             }
             ResolvedExpression::Roots(candidates) => {
-                let mut positions: Vec<_> = self
+                let positions: Vec<_> = self
                     .evaluate(candidates)?
                     .positions()
                     .attach(index)
                     .try_collect()?;
                 let filled = RevWalkBuilder::new(index)
                     .wanted_heads(positions.clone())
-                    .descendants(positions.iter().copied().collect())
-                    .collect_positions_set();
-                positions.retain(|&pos| {
-                    !index
-                        .commits()
-                        .entry_by_pos(pos)
-                        .parent_positions()
+                    .descendants(positions.iter().copied().collect())?
+                    .collect_positions_set()?;
+                let mut roots = Vec::new();
+                for position in positions {
+                    let entry = index.entry_by_position(position)?;
+                    if !entry
+                        .parent_positions
                         .iter()
                         .any(|parent| filled.contains(parent))
-                });
+                    {
+                        roots.push(position);
+                    }
+                }
+                let positions = roots;
                 Ok(Box::new(EagerRevset { positions }))
             }
             ResolvedExpression::Forks { heads } => {
@@ -982,13 +1005,23 @@ impl EvaluationContext<'_> {
                     .wanted_heads(head_positions)
                     .ancestors()
                     .detach()
-                    .filter_map(move |index: &CompositeIndex, pos| {
-                        let is_fork = child_counts.remove(&pos).unwrap_or(0) >= 2;
-                        for parent in index.commits().entry_by_pos(pos).parent_positions() {
-                            *child_counts.entry(parent).or_insert(0) += 1;
+                    .filter_map(
+                        move |index: &Arc<dyn PositionIndex>,
+                              result: Result<GlobalCommitPosition, IndexError>| {
+                        let result = result.and_then(|pos| {
+                            let is_fork = child_counts.remove(&pos).unwrap_or(0) >= 2;
+                            for parent in index.entry_by_position(pos)?.parent_positions {
+                                *child_counts.entry(parent).or_insert(0) += 1;
+                            }
+                            Ok(is_fork.then_some(pos))
+                        });
+                        match result {
+                            Ok(Some(pos)) => Some(Ok(pos)),
+                            Ok(None) => None,
+                            Err(err) => Some(Err(err)),
                         }
-                        is_fork.then_some(pos)
-                    });
+                        },
+                    );
                 Ok(Box::new(RevWalkRevset { walk }))
             }
             ResolvedExpression::ForkPoint(expression) => {
@@ -999,9 +1032,11 @@ impl EvaluationContext<'_> {
                 };
                 let mut positions = vec![position?];
                 for position in expression_positions_iter {
-                    positions = index
-                        .commits()
-                        .common_ancestors_pos(positions, vec![position?]);
+                    positions = position_index::common_ancestor_positions(
+                        index.as_ref(),
+                        positions,
+                        vec![position?],
+                    )?;
                 }
                 Ok(Box::new(EagerRevset { positions }))
             }
@@ -1018,32 +1053,35 @@ impl EvaluationContext<'_> {
                     .positions()
                     .attach(index)
                     .try_collect()?;
-                let mut candidates = RevWalkBuilder::new(index)
+                let mut candidates: Vec<GlobalCommitPosition> = RevWalkBuilder::new(index)
                     .wanted_heads(visible_head_positions)
-                    .descendants(maplit::hashset![position?])
-                    .collect_vec();
+                    .descendants(maplit::hashset![position?])?
+                    .try_collect()?;
                 candidates.reverse();
                 for position in root_position_iter {
                     let descendants = RevWalkBuilder::new(index)
                         .wanted_heads(candidates.clone())
-                        .descendants(maplit::hashset![position?])
-                        .collect_positions_set();
+                        .descendants(maplit::hashset![position?])?
+                        .collect_positions_set()?;
                     candidates.retain(|pos| descendants.contains(pos));
                     if candidates.is_empty() {
                         return Ok(Box::new(EagerRevset::empty()));
                     }
                 }
                 let candidate_set: HashSet<_> = candidates.iter().copied().collect();
-                candidates.retain(|&pos| {
-                    !index
-                        .commits()
-                        .entry_by_pos(pos)
-                        .parent_positions()
+                let mut merge_points = Vec::new();
+                for position in candidates {
+                    let entry = index.entry_by_position(position)?;
+                    if !entry
+                        .parent_positions
                         .iter()
                         .any(|parent| candidate_set.contains(parent))
-                });
+                    {
+                        merge_points.push(position);
+                    }
+                }
                 Ok(Box::new(EagerRevset {
-                    positions: candidates,
+                    positions: merge_points,
                 }))
             }
             ResolvedExpression::Bisect(candidates) => {
@@ -1128,36 +1166,44 @@ impl EvaluationContext<'_> {
                 Ok(build_predicate_fn(self.store.clone(), predicate))
             }
             ResolvedPredicateExpression::Divergent { visible_heads } => {
-                let composite = self.index.as_composite().commits();
-                let mut reachable_set = AncestorsBitSet::with_capacity(composite.num_commits());
+                let index = self.index;
+                let mut reachable_set = AncestorsBitSet::with_capacity(index.num_commits());
                 for id in visible_heads {
-                    reachable_set.add_head(composite.commit_id_to_pos(id).unwrap());
+                    let position = index
+                        .position_by_commit_id(id)?
+                        .ok_or_else(|| IndexError::CommitNotFound(id.clone()))?;
+                    reachable_set.add_head(position);
                 }
                 let reachable_set = Rc::new(RefCell::new(reachable_set));
-                Ok(box_pure_predicate_fn(
-                    move |index: &CompositeIndex, pos: GlobalCommitPosition| {
-                        let commits = index.commits();
-
-                        match commits.resolve_change_id_prefix(&HexPrefix::from_id(
-                            &commits.entry_by_pos(pos).change_id(),
-                        )) {
-                            PrefixResolution::NoMatch => {
-                                panic!("the commit itself should be reachable")
-                            }
-                            PrefixResolution::SingleMatch((_change_id, positions)) => {
-                                let mut reachable_set = reachable_set.borrow_mut();
-                                let targets = commits.resolve_change_targets_for_positions(
-                                    &positions,
-                                    &mut reachable_set,
-                                );
-                                Ok(targets.is_divergent())
-                            }
-                            PrefixResolution::AmbiguousMatch => {
-                                panic!("complete change_id should be unambiguous")
-                            }
+                Ok(box_pure_predicate_fn(move |index, pos| {
+                    let entry = index.entry_by_position(pos)?;
+                    match index.resolve_change_id_prefix(&HexPrefix::from_id(&entry.change_id))? {
+                        PrefixResolution::NoMatch => Err(IndexError::Corrupt(
+                            "commit change ID is absent from the change lookup".to_owned(),
+                        )
+                        .into()),
+                        PrefixResolution::SingleMatch(positions) => {
+                            let Some(&oldest_position) = positions.last() else {
+                                return Err(IndexError::Corrupt(
+                                    "change ID lookup has no commit positions".to_owned(),
+                                )
+                                .into());
+                            };
+                            let mut reachable_set = reachable_set.borrow_mut();
+                            reachable_set.visit_until(index.as_ref(), oldest_position)?;
+                            Ok(positions
+                                .iter()
+                                .filter(|&&position| reachable_set.contains(position))
+                                .take(2)
+                                .count()
+                                >= 2)
                         }
-                    },
-                ))
+                        PrefixResolution::AmbiguousMatch => Err(IndexError::Corrupt(
+                            "complete change ID is ambiguous".to_owned(),
+                        )
+                        .into()),
+                    }
+                }))
             }
             ResolvedPredicateExpression::Set(expression) => Ok(self.evaluate(expression)?),
             ResolvedPredicateExpression::NotIn(complement) => {
@@ -1188,14 +1234,8 @@ impl EvaluationContext<'_> {
                 // but there are a few edge cases that break the precondition.
                 // For example, in jj <= 0.22, the root commit doesn't exist in
                 // the root operation.
-                self.index.commits().commit_id_to_pos(id).ok_or_else(|| {
-                    RevsetEvaluationError::Other(
-                        format!(
-                            "Commit ID {} not found in index (index or view might be corrupted)",
-                            id.hex()
-                        )
-                        .into(),
-                    )
+                self.index.position_by_commit_id(id)?.ok_or_else(|| {
+                    RevsetEvaluationError::Index(IndexError::CommitNotFound(id.clone()))
                 })
             })
             .try_collect()?;
@@ -1220,11 +1260,12 @@ impl EvaluationContext<'_> {
         }
 
         let make_rev_item = |pos| -> Result<_, RevsetEvaluationError> {
-            let entry = self.index.commits().entry_by_pos(pos?);
-            let commit = self.store.get_commit(&entry.commit_id())?;
+            let pos = pos?;
+            let entry = self.index.entry_by_position(pos)?;
+            let commit = self.store.get_commit(&entry.commit_id)?;
             Ok(Reverse(Item {
                 timestamp: commit.committer().timestamp.timestamp,
-                pos: entry.position(),
+                pos,
             }))
         };
 
@@ -1265,7 +1306,8 @@ impl<F> fmt::Debug for PurePredicateFn<F> {
 
 impl<F> ToPredicateFn for PurePredicateFn<F>
 where
-    F: Fn(&CompositeIndex, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError> + Clone,
+    F: Fn(&Arc<dyn PositionIndex>, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError>
+        + Clone,
 {
     fn to_predicate_fn<'a>(&self) -> BoxedPredicateFn<'a>
     where
@@ -1277,14 +1319,15 @@ where
 
 fn as_pure_predicate_fn<F>(f: F) -> PurePredicateFn<F>
 where
-    F: Fn(&CompositeIndex, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError> + Clone,
+    F: Fn(&Arc<dyn PositionIndex>, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError>
+        + Clone,
 {
     PurePredicateFn(f)
 }
 
 fn box_pure_predicate_fn<'a, F>(f: F) -> Box<dyn ToPredicateFn + 'a>
 where
-    F: Fn(&CompositeIndex, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError>
+    F: Fn(&Arc<dyn PositionIndex>, GlobalCommitPosition) -> Result<bool, RevsetEvaluationError>
         + Clone
         + 'a,
 {
@@ -1299,47 +1342,50 @@ fn build_predicate_fn(
         RevsetFilterPredicate::ParentCount(parent_count_range) => {
             let parent_count_range = parent_count_range.clone();
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                Ok(parent_count_range.contains(&entry.num_parents()))
+                let entry = index.entry_by_position(pos)?;
+                let parent_count = u32::try_from(entry.parent_positions.len()).map_err(|_| {
+                    IndexError::Corrupt("commit has too many parent positions".to_owned())
+                })?;
+                Ok(parent_count_range.contains(&parent_count))
             })
         }
         RevsetFilterPredicate::Description(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(matcher.is_match(commit.description()))
             })
         }
         RevsetFilterPredicate::Subject(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(matcher.is_match(commit.description().lines().next().unwrap_or_default()))
             })
         }
         RevsetFilterPredicate::AuthorName(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(matcher.is_match(&commit.author().name))
             })
         }
         RevsetFilterPredicate::AuthorEmail(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(matcher.is_match(&commit.author().email))
             })
         }
         RevsetFilterPredicate::AuthorDate(expression) => {
             let expression = *expression;
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 let author_date = &commit.author().timestamp;
                 Ok(expression.matches(author_date))
             })
@@ -1347,24 +1393,24 @@ fn build_predicate_fn(
         RevsetFilterPredicate::CommitterName(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(matcher.is_match(&commit.committer().name))
             })
         }
         RevsetFilterPredicate::CommitterEmail(expression) => {
             let matcher = Rc::new(expression.to_matcher());
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(matcher.is_match(&commit.committer().email))
             })
         }
         RevsetFilterPredicate::CommitterDate(expression) => {
             let expression = *expression;
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 let committer_date = &commit.committer().timestamp;
                 Ok(expression.matches(committer_date))
             })
@@ -1372,11 +1418,11 @@ fn build_predicate_fn(
         RevsetFilterPredicate::File(expr) => {
             let matcher: Rc<dyn Matcher> = expr.to_matcher().into();
             box_pure_predicate_fn(move |index, pos| {
-                if let Some(mut paths) = index.changed_paths().changed_paths(pos) {
-                    return Ok(paths.any(|path| matcher.matches(path)));
+                if let Some(paths) = index.changed_paths(pos)? {
+                    return Ok(paths.iter().any(|path| matcher.matches(path)));
                 }
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(has_diff_from_parent(&store, index, &commit, &*matcher).block_on()?)
             })
         }
@@ -1386,8 +1432,9 @@ fn build_predicate_fn(
             let side = *side;
             box_pure_predicate_fn(move |index, pos| {
                 let narrowed_files_matcher;
-                let files_matcher = if let Some(paths) = index.changed_paths().changed_paths(pos) {
+                let files_matcher = if let Some(paths) = index.changed_paths(pos)? {
                     let matched_paths = paths
+                        .into_iter()
                         .filter(|path| files_matcher.matches(path))
                         .collect_vec();
                     if matched_paths.is_empty() {
@@ -1398,8 +1445,8 @@ fn build_predicate_fn(
                 } else {
                     &*files_matcher
                 };
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(matches_diff_from_parent(
                     &store,
                     index,
@@ -1412,20 +1459,20 @@ fn build_predicate_fn(
             })
         }
         RevsetFilterPredicate::HasConflict => box_pure_predicate_fn(move |index, pos| {
-            let entry = index.commits().entry_by_pos(pos);
-            let commit = store.get_commit(&entry.commit_id())?;
+            let entry = index.entry_by_position(pos)?;
+            let commit = store.get_commit(&entry.commit_id)?;
             Ok(commit.has_conflict())
         }),
         RevsetFilterPredicate::Signed => box_pure_predicate_fn(move |index, pos| {
-            let entry = index.commits().entry_by_pos(pos);
-            let commit = store.get_commit(&entry.commit_id())?;
+            let entry = index.entry_by_position(pos)?;
+            let commit = store.get_commit(&entry.commit_id)?;
             Ok(commit.is_signed())
         }),
         RevsetFilterPredicate::Extension(ext) => {
             let ext = ext.clone();
             box_pure_predicate_fn(move |index, pos| {
-                let entry = index.commits().entry_by_pos(pos);
-                let commit = store.get_commit(&entry.commit_id())?;
+                let entry = index.entry_by_position(pos)?;
+                let commit = store.get_commit(&entry.commit_id)?;
                 Ok(ext.matches_commit(&commit))
             })
         }
@@ -1434,7 +1481,7 @@ fn build_predicate_fn(
 
 async fn has_diff_from_parent(
     store: &Arc<Store>,
-    index: &CompositeIndex,
+    index: &Arc<dyn PositionIndex>,
     commit: &Commit,
     matcher: &dyn Matcher,
 ) -> BackendResult<bool> {
@@ -1450,8 +1497,10 @@ async fn has_diff_from_parent(
     }
 
     // Conflict resolution is expensive, try that only for matched files.
+    let index_adapter = PositionIndexAdapter::new(index.clone());
     let from_tree =
-        rewrite::merge_commit_trees_no_resolve_without_repo(store, index, &parents).await?;
+        rewrite::merge_commit_trees_no_resolve_without_repo(store, &index_adapter, &parents)
+            .await?;
     let to_tree = commit.tree();
     // TODO: handle copy tracking
     let mut tree_diff = from_tree.diff_stream(&to_tree, matcher);
@@ -1469,7 +1518,7 @@ async fn has_diff_from_parent(
 
 async fn matches_diff_from_parent(
     store: &Arc<Store>,
-    index: &CompositeIndex,
+    index: &Arc<dyn PositionIndex>,
     commit: &Commit,
     text_matcher: &StringMatcher,
     files_matcher: &dyn Matcher,
@@ -1477,8 +1526,10 @@ async fn matches_diff_from_parent(
 ) -> BackendResult<bool> {
     let parents = commit.parents().await?;
     // Conflict resolution is expensive, try that only for matched files.
+    let index_adapter = PositionIndexAdapter::new(index.clone());
     let from_tree =
-        rewrite::merge_commit_trees_no_resolve_without_repo(store, index, &parents).await?;
+        rewrite::merge_commit_trees_no_resolve_without_repo(store, &index_adapter, &parents)
+            .await?;
     let to_tree = commit.tree();
     // TODO: handle copy tracking
     let mut tree_diff = from_tree.diff_stream(&to_tree, files_matcher);
@@ -1576,6 +1627,7 @@ mod tests {
 
     use super::*;
     use crate::default_index::DefaultMutableIndex;
+    use crate::default_index::composite::AsCompositeIndex as _;
     use crate::default_index::readonly::FieldLengths;
     use crate::files::FileMergeHunkLevel;
     use crate::merge::SameChange;
@@ -1612,8 +1664,9 @@ mod tests {
         index.add_commit_data(id_3.clone(), new_change_id(), &[id_2.clone()]);
         index.add_commit_data(id_4.clone(), new_change_id(), &[id_3.clone()]);
 
-        let index = index.as_composite();
-        let get_pos = |id: &CommitId| index.commits().commit_id_to_pos(id).unwrap();
+        let index_handle: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
+        let index = &index_handle;
+        let get_pos = |id: &CommitId| index.position_by_commit_id(id).unwrap().unwrap();
         let make_positions = |ids: &[&CommitId]| ids.iter().copied().map(get_pos).collect_vec();
         let make_set = |ids: &[&CommitId]| -> Box<dyn InternalRevset> {
             let positions = make_positions(ids);
@@ -1636,7 +1689,7 @@ mod tests {
         let set = FilterRevset {
             candidates: make_set(&[&id_4, &id_2, &id_0]),
             predicate: as_pure_predicate_fn(|index, pos| {
-                Ok(index.commits().entry_by_pos(pos).commit_id() != id_4)
+                Ok(index.entry_by_position(pos)?.commit_id != id_4)
             }),
         };
         assert_eq!(
@@ -1724,8 +1777,9 @@ mod tests {
         index.add_commit_data(id_1.clone(), new_change_id(), &[id_0.clone()]);
         index.add_commit_data(id_2.clone(), new_change_id(), &[id_1.clone()]);
 
-        let index = index.as_composite();
-        let get_pos = |id: &CommitId| index.commits().commit_id_to_pos(id).unwrap();
+        let index_handle: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
+        let index = &index_handle;
+        let get_pos = |id: &CommitId| index.position_by_commit_id(id).unwrap().unwrap();
         let make_positions = |ids: &[&CommitId]| ids.iter().copied().map(get_pos).collect_vec();
         let make_good_set = |ids: &[&CommitId]| -> Box<dyn InternalRevset> {
             let positions = make_positions(ids);
@@ -1737,7 +1791,7 @@ mod tests {
             Box::new(FilterRevset {
                 candidates: EagerRevset { positions },
                 predicate: as_pure_predicate_fn(move |index, pos| {
-                    if index.commits().entry_by_pos(pos).commit_id() == bad_id {
+                    if index.entry_by_position(pos)?.commit_id == bad_id {
                         Err(RevsetEvaluationError::Other("bad".into()))
                     } else {
                         Ok(true)
@@ -1863,8 +1917,9 @@ mod tests {
         index.add_commit_data(id_3.clone(), new_change_id(), &[id_2.clone()]);
         index.add_commit_data(id_4.clone(), new_change_id(), &[id_3.clone()]);
 
-        let index = index.as_composite();
-        let get_pos = |id: &CommitId| index.commits().commit_id_to_pos(id).unwrap();
+        let index_handle: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
+        let index = &index_handle;
+        let get_pos = |id: &CommitId| index.position_by_commit_id(id).unwrap().unwrap();
         let make_positions = |ids: &[&CommitId]| ids.iter().copied().map(get_pos).collect_vec();
         let make_set = |ids: &[&CommitId]| -> Box<dyn InternalRevset> {
             let positions = make_positions(ids);
@@ -1874,7 +1929,7 @@ mod tests {
         let full_set = make_set(&[&id_4, &id_3, &id_2, &id_1, &id_0]);
 
         // Consumes entries incrementally
-        let positions_accum = PositionsAccumulator::new(index, full_set.positions());
+        let positions_accum = PositionsAccumulator::new(index.clone(), full_set.positions());
 
         assert!(positions_accum.contains(&id_3)?);
         assert_eq!(positions_accum.consumed_len(), 2);
@@ -1886,14 +1941,14 @@ mod tests {
         assert_eq!(positions_accum.consumed_len(), 5);
 
         // Does not consume positions for unknown commits
-        let positions_accum = PositionsAccumulator::new(index, full_set.positions());
+        let positions_accum = PositionsAccumulator::new(index.clone(), full_set.positions());
 
         assert!(!positions_accum.contains(&CommitId::from_hex("999999"))?);
         assert_eq!(positions_accum.consumed_len(), 0);
 
         // Does not consume without necessity
         let set = make_set(&[&id_3, &id_2, &id_1]);
-        let positions_accum = PositionsAccumulator::new(index, set.positions());
+        let positions_accum = PositionsAccumulator::new(index.clone(), set.positions());
 
         assert!(!positions_accum.contains(&id_4)?);
         assert_eq!(positions_accum.consumed_len(), 1);

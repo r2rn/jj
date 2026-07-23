@@ -24,15 +24,7 @@ use super::composite::DynCommitIndexSegment;
 use crate::backend::ChangeId;
 use crate::backend::CommitId;
 use crate::object_id::ObjectId as _;
-
-/// Global commit index position.
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]
-pub(super) struct GlobalCommitPosition(pub(super) u32);
-
-impl GlobalCommitPosition {
-    pub const MIN: Self = Self(u32::MIN);
-    pub const MAX: Self = Self(u32::MAX);
-}
+pub(super) use crate::position_index::GlobalPosition as GlobalCommitPosition;
 
 /// Local commit position within an index segment.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord, Clone, Copy, Hash)]

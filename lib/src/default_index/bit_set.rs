@@ -14,8 +14,9 @@
 
 use std::cmp::min;
 
-use super::composite::CompositeCommitIndex;
 use super::entry::GlobalCommitPosition;
+use crate::index::IndexResult;
+use crate::position_index::PositionIndex;
 
 /// Unit of buffer allocation, which is 4kB.
 const PAGE_SIZE_IN_BITS: u32 = 4096 * 8;
@@ -168,12 +169,12 @@ impl AncestorsBitSet {
     /// Updates set by visiting ancestors until the given `to_visit_pos`.
     pub fn visit_until(
         &mut self,
-        index: &CompositeCommitIndex,
+        index: &dyn PositionIndex,
         to_visit_pos: GlobalCommitPosition,
-    ) {
+    ) -> IndexResult<()> {
         let (last_bitset_pos_to_visit, _) = self.bitset.to_bitset_pos(to_visit_pos);
         if last_bitset_pos_to_visit < self.next_bitset_pos_to_visit {
-            return;
+            return Ok(());
         }
         self.bitset.ensure_data(last_bitset_pos_to_visit);
         for visiting_bitset_pos in self.next_bitset_pos_to_visit..=last_bitset_pos_to_visit {
@@ -183,8 +184,13 @@ impl AncestorsBitSet {
                 let bit_pos = u64::BITS - unvisited_bits.leading_zeros() - 1; // from MSB
                 unvisited_bits ^= 1_u64 << bit_pos;
                 let current_pos = self.bitset.to_global_pos((visiting_bitset_pos, bit_pos));
-                for parent_pos in index.entry_by_pos(current_pos).parent_positions() {
-                    assert!(parent_pos < current_pos);
+                for parent_pos in index.entry_by_position(current_pos)?.parent_positions {
+                    if parent_pos >= current_pos {
+                        return Err(crate::index::IndexError::InvalidParentPosition {
+                            parent: parent_pos,
+                            child: current_pos,
+                        });
+                    }
                     let (parent_bitset_pos, parent_bit_pos) = self.bitset.to_bitset_pos(parent_pos);
                     self.bitset.ensure_data(parent_bitset_pos);
                     let bit = 1_u64 << parent_bit_pos;
@@ -196,6 +202,7 @@ impl AncestorsBitSet {
             }
         }
         self.next_bitset_pos_to_visit = last_bitset_pos_to_visit + 1;
+        Ok(())
     }
 }
 
@@ -349,8 +356,8 @@ mod tests {
         );
         assert_eq!(mutable_index.num_commits(), 257);
 
-        let index = mutable_index.as_composite().commits();
-        let to_pos = |id: &CommitId| index.commit_id_to_pos(id).unwrap();
+        let index = mutable_index.as_composite();
+        let to_pos = |id: &CommitId| index.position_by_commit_id(id).unwrap().unwrap();
         let new_ancestors_set = |heads: &[&CommitId]| {
             let mut set = AncestorsBitSet::with_capacity(index.num_commits());
             for &id in heads {
@@ -369,17 +376,17 @@ mod tests {
         // All reachable
         let mut set = new_ancestors_set(&[&id_f256, &id_d255]);
         assert_eq!(set.next_bitset_pos_to_visit, 0);
-        set.visit_until(index, to_pos(&id_f256));
+        set.visit_until(index, to_pos(&id_f256)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 1);
         assert!(set.contains(to_pos(&id_f256)));
-        set.visit_until(index, to_pos(&id_d192));
+        set.visit_until(index, to_pos(&id_d192)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 2);
         assert!(set.contains(to_pos(&id_e254)));
         assert!(set.contains(to_pos(&id_d255)));
         assert!(set.contains(to_pos(&id_d192)));
-        set.visit_until(index, to_pos(&id_a0));
+        set.visit_until(index, to_pos(&id_a0)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 5);
-        set.visit_until(index, to_pos(&id_f256)); // should be noop
+        set.visit_until(index, to_pos(&id_f256)).unwrap(); // should be noop
         assert_eq!(set.next_bitset_pos_to_visit, 5);
         for pos in (0..=256).map(GlobalCommitPosition) {
             assert!(set.contains(pos), "{pos:?} should be reachable");
@@ -388,21 +395,21 @@ mod tests {
         // A, B, C, E, F are reachable
         let mut set = new_ancestors_set(&[&id_f256]);
         assert_eq!(set.next_bitset_pos_to_visit, 0);
-        set.visit_until(index, to_pos(&id_f256));
+        set.visit_until(index, to_pos(&id_f256)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 1);
         assert!(set.contains(to_pos(&id_f256)));
-        set.visit_until(index, to_pos(&id_d192));
+        set.visit_until(index, to_pos(&id_d192)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 2);
         assert!(!set.contains(to_pos(&id_d255)));
         assert!(!set.contains(to_pos(&id_d192)));
-        set.visit_until(index, to_pos(&id_c190));
+        set.visit_until(index, to_pos(&id_c190)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 3);
         assert!(set.contains(to_pos(&id_c190)));
-        set.visit_until(index, to_pos(&id_a64));
+        set.visit_until(index, to_pos(&id_a64)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 4);
         assert!(set.contains(to_pos(&id_b191)));
         assert!(set.contains(to_pos(&id_a64)));
-        set.visit_until(index, to_pos(&id_a0));
+        set.visit_until(index, to_pos(&id_a0)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 5);
         assert!(set.contains(to_pos(&id_a0)));
 
@@ -410,19 +417,19 @@ mod tests {
         let mut set = new_ancestors_set(&[&id_d255]);
         assert_eq!(set.next_bitset_pos_to_visit, 1);
         assert!(!set.contains(to_pos(&id_f256)));
-        set.visit_until(index, to_pos(&id_e254));
+        set.visit_until(index, to_pos(&id_e254)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 2);
         assert!(!set.contains(to_pos(&id_e254)));
-        set.visit_until(index, to_pos(&id_d255));
+        set.visit_until(index, to_pos(&id_d255)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 2);
         assert!(set.contains(to_pos(&id_d255)));
-        set.visit_until(index, to_pos(&id_b191));
+        set.visit_until(index, to_pos(&id_b191)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 3);
         assert!(!set.contains(to_pos(&id_b191)));
-        set.visit_until(index, to_pos(&id_c190));
+        set.visit_until(index, to_pos(&id_c190)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 3);
         assert!(set.contains(to_pos(&id_c190)));
-        set.visit_until(index, to_pos(&id_a0));
+        set.visit_until(index, to_pos(&id_a0)).unwrap();
         assert_eq!(set.next_bitset_pos_to_visit, 5);
         assert!(set.contains(to_pos(&id_a64)));
         assert!(set.contains(to_pos(&id_a0)));
@@ -446,7 +453,7 @@ mod tests {
             mutable_index.add_commit_data(id.clone(), new_change_id(), &[parent_id]);
             id
         });
-        let index = mutable_index.as_composite().commits();
+        let index = mutable_index.as_composite();
 
         let mut set = AncestorsBitSet::with_capacity(index.num_commits());
         assert_eq!(set.next_bitset_pos_to_visit, PAGE_SIZE_IN_WORDS + 1);
@@ -456,18 +463,18 @@ mod tests {
         assert_eq!(set.next_bitset_pos_to_visit, 0);
         assert_eq!(set.bitset.data.len(), page_size_in_words);
 
-        set.visit_until(index, GlobalCommitPosition(PAGE_SIZE_IN_BITS));
+        set.visit_until(index, GlobalCommitPosition(PAGE_SIZE_IN_BITS))?;
         assert_eq!(set.next_bitset_pos_to_visit, 1);
         assert_eq!(set.bitset.data.len(), page_size_in_words);
         assert!(set.contains(GlobalCommitPosition(PAGE_SIZE_IN_BITS)));
 
-        set.visit_until(index, GlobalCommitPosition(PAGE_SIZE_IN_BITS - 1));
+        set.visit_until(index, GlobalCommitPosition(PAGE_SIZE_IN_BITS - 1))?;
         assert_eq!(set.next_bitset_pos_to_visit, 2);
         assert_eq!(set.bitset.data.len(), page_size_in_words);
         assert!(set.contains(GlobalCommitPosition(PAGE_SIZE_IN_BITS - 1)));
 
         // Parent link across page boundary
-        set.visit_until(index, GlobalCommitPosition(u64::BITS));
+        set.visit_until(index, GlobalCommitPosition(u64::BITS))?;
         assert_eq!(set.next_bitset_pos_to_visit, PAGE_SIZE_IN_WORDS);
         assert_eq!(
             set.bitset.data.len(),
@@ -475,7 +482,7 @@ mod tests {
         );
         assert!(set.contains(GlobalCommitPosition(u64::BITS)));
 
-        set.visit_until(index, GlobalCommitPosition(0));
+        set.visit_until(index, GlobalCommitPosition(0))?;
         assert_eq!(set.next_bitset_pos_to_visit, PAGE_SIZE_IN_WORDS + 1);
         assert_eq!(
             set.bitset.data.len(),

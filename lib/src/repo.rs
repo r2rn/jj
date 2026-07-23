@@ -946,7 +946,7 @@ impl MutableRepo {
             && self.view() == &self.base_repo.view)
     }
 
-    pub(crate) fn consume(
+    pub fn consume(
         self,
     ) -> (
         Box<dyn MutableIndex>,

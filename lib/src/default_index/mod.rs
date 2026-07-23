@@ -27,10 +27,11 @@ mod mutable;
 mod readonly;
 mod rev_walk;
 mod rev_walk_queue;
-mod revset_engine;
+pub(crate) mod revset_engine;
 mod revset_graph_iterator;
 mod store;
 
+pub use self::changed_path::collect_changed_paths;
 pub use self::mutable::DefaultMutableIndex;
 pub use self::readonly::ChangedPathIndexLevelStats;
 pub use self::readonly::CommitIndexLevelStats;
@@ -74,6 +75,8 @@ mod tests {
     use crate::default_index::entry::SmallLocalCommitPositionsVec;
     use crate::default_index::readonly::FieldLengths;
     use crate::index::Index as _;
+    use crate::index::IndexCommitRecord;
+    use crate::index::MutableIndex as _;
     use crate::object_id::HexPrefix;
     use crate::object_id::PrefixResolution;
     use crate::revset::PARENTS_RANGE_FULL;
@@ -118,6 +121,74 @@ mod tests {
         descendant_id: &CommitId,
     ) -> bool {
         index.is_ancestor(ancestor_id, descendant_id).unwrap()
+    }
+
+    #[test]
+    fn mutable_index_delta_uses_parent_ids_in_topological_order() {
+        let mut new_commit_id = commit_id_generator();
+        let mut new_change_id = change_id_generator();
+        let parent_id = new_commit_id();
+        let child_id = new_commit_id();
+        let parent_change_id = new_change_id();
+        let child_change_id = new_change_id();
+        let mut index = DefaultMutableIndex::full(TEST_FIELD_LENGTHS);
+        index.add_commit_data(parent_id.clone(), parent_change_id.clone(), &[]);
+        index.add_commit_data(
+            child_id.clone(),
+            child_change_id.clone(),
+            std::slice::from_ref(&parent_id),
+        );
+
+        let delta = Box::new(index).into_delta().unwrap();
+
+        assert_eq!(
+            delta.commits,
+            vec![
+                IndexCommitRecord {
+                    commit_id: parent_id.clone(),
+                    change_id: parent_change_id,
+                    parent_ids: vec![],
+                },
+                IndexCommitRecord {
+                    commit_id: child_id,
+                    change_id: child_change_id,
+                    parent_ids: vec![parent_id],
+                },
+            ]
+        );
+        assert!(delta.changed_paths.is_empty());
+    }
+
+    #[test]
+    fn mutable_index_delta_excludes_readonly_base() {
+        let temp_dir = new_temp_dir();
+        let mut new_change_id = change_id_generator();
+        let base_id = CommitId::from_hex("111111");
+        let child_id = CommitId::from_hex("222222");
+        let child_change_id = new_change_id();
+        let mut base_segment = MutableCommitIndexSegment::full(TEST_FIELD_LENGTHS);
+        base_segment.add_commit_data(base_id.clone(), new_change_id(), &[]);
+        let base_segment = base_segment.save_in(temp_dir.path()).unwrap();
+        let base_index =
+            DefaultReadonlyIndex::from_segment(base_segment, CompositeChangedPathIndex::null());
+        let mut index = DefaultMutableIndex::incremental(&base_index);
+        index.add_commit_data(
+            child_id.clone(),
+            child_change_id.clone(),
+            std::slice::from_ref(&base_id),
+        );
+
+        let delta = Box::new(index).into_delta().unwrap();
+
+        assert_eq!(
+            delta.commits,
+            vec![IndexCommitRecord {
+                commit_id: child_id,
+                change_id: child_change_id,
+                parent_ids: vec![base_id],
+            }]
+        );
+        assert!(delta.changed_paths.is_empty());
     }
 
     #[test_case(false; "memory")]

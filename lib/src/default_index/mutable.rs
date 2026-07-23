@@ -57,7 +57,10 @@ use crate::file_util::IoResultExt as _;
 use crate::file_util::PathError;
 use crate::file_util::persist_content_addressed_temp_file;
 use crate::index::ChangeIdIndex;
+use crate::index::ChangedPathRecord;
 use crate::index::Index;
+use crate::index::IndexCommitRecord;
+use crate::index::IndexDelta;
 use crate::index::IndexError;
 use crate::index::IndexResult;
 use crate::index::MutableIndex;
@@ -65,6 +68,9 @@ use crate::index::ReadonlyIndex;
 use crate::object_id::HexPrefix;
 use crate::object_id::ObjectId;
 use crate::object_id::PrefixResolution;
+use crate::position_index::GlobalPosition;
+use crate::position_index::IndexGraphEntry;
+use crate::position_index::PositionIndex;
 use crate::repo_path::RepoPathBuf;
 use crate::revset::ResolvedExpression;
 use crate::revset::Revset;
@@ -481,6 +487,40 @@ impl DefaultMutableIndex {
         self.0.into_mutable().expect("must have mutable")
     }
 
+    fn into_delta(mut self) -> IndexDelta {
+        let first_position = self
+            .0
+            .mutable_commits()
+            .expect("must have mutable")
+            .num_parent_commits;
+        let commits = self.0.commits();
+        let mut commit_records = Vec::new();
+        let mut changed_path_records = Vec::new();
+
+        for position in (first_position..commits.num_commits()).map(GlobalCommitPosition) {
+            let entry = commits.entry_by_pos(position);
+            let commit_id = entry.commit_id();
+            let parent_ids = entry.parents().map(|parent| parent.commit_id()).collect();
+            commit_records.push(IndexCommitRecord {
+                commit_id: commit_id.clone(),
+                change_id: entry.change_id(),
+                parent_ids,
+            });
+
+            if let Some(paths) = self.0.changed_paths().changed_paths(position) {
+                changed_path_records.push(ChangedPathRecord {
+                    commit_id,
+                    paths: paths.map(|path| path.to_owned()).collect(),
+                });
+            }
+        }
+
+        IndexDelta {
+            commits: commit_records,
+            changed_paths: changed_path_records,
+        }
+    }
+
     fn mutable_commits(&mut self) -> &mut MutableCommitIndexSegment {
         self.0.mutable_commits().expect("must have mutable")
     }
@@ -549,6 +589,38 @@ impl AsCompositeIndex for DefaultMutableIndex {
     }
 }
 
+impl PositionIndex for DefaultMutableIndex {
+    fn num_commits(&self) -> u32 {
+        PositionIndex::num_commits(&self.0)
+    }
+
+    fn position_by_commit_id(&self, id: &CommitId) -> IndexResult<Option<GlobalPosition>> {
+        self.0.position_by_commit_id(id)
+    }
+
+    fn entry_by_position(&self, position: GlobalPosition) -> IndexResult<IndexGraphEntry> {
+        self.0.entry_by_position(position)
+    }
+
+    fn resolve_commit_id_prefix(
+        &self,
+        prefix: &HexPrefix,
+    ) -> IndexResult<PrefixResolution<CommitId>> {
+        PositionIndex::resolve_commit_id_prefix(&self.0, prefix)
+    }
+
+    fn resolve_change_id_prefix(
+        &self,
+        prefix: &HexPrefix,
+    ) -> IndexResult<PrefixResolution<Vec<GlobalPosition>>> {
+        self.0.resolve_change_id_prefix(prefix)
+    }
+
+    fn changed_paths(&self, position: GlobalPosition) -> IndexResult<Option<Vec<RepoPathBuf>>> {
+        PositionIndex::changed_paths(&self.0, position)
+    }
+}
+
 impl Index for DefaultMutableIndex {
     fn shortest_unique_commit_id_prefix_len(&self, commit_id: &CommitId) -> IndexResult<usize> {
         self.0.shortest_unique_commit_id_prefix_len(commit_id)
@@ -558,7 +630,7 @@ impl Index for DefaultMutableIndex {
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<CommitId>> {
-        self.0.resolve_commit_id_prefix(prefix)
+        Index::resolve_commit_id_prefix(&self.0, prefix)
     }
 
     fn has_id(&self, commit_id: &CommitId) -> IndexResult<bool> {
@@ -622,6 +694,10 @@ impl MutableIndex for DefaultMutableIndex {
             .expect("index to merge in must be a DefaultReadonlyIndex");
         Self::merge_in(self, other);
         Ok(())
+    }
+
+    fn into_delta(self: Box<Self>) -> IndexResult<IndexDelta> {
+        Ok(Self::into_delta(*self))
     }
 }
 

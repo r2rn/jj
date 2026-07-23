@@ -19,15 +19,16 @@ use std::collections::HashSet;
 use std::iter::Fuse;
 use std::iter::FusedIterator;
 use std::ops::Range;
+use std::sync::Arc;
 
 use smallvec::SmallVec;
 
-use super::composite::CompositeCommitIndex;
-use super::composite::CompositeIndex;
 use super::entry::GlobalCommitPosition;
-use super::entry::SmallGlobalCommitPositionsVec;
 use super::rev_walk_queue::RevWalkQueue;
 use super::rev_walk_queue::RevWalkWorkItem;
+use crate::index::IndexError;
+use crate::index::IndexResult;
+use crate::position_index::PositionIndex;
 use crate::revset::PARENTS_RANGE_FULL;
 
 /// Like `Iterator`, but doesn't borrow the `index` internally.
@@ -175,6 +176,7 @@ impl<I: ?Sized, W: RevWalk<I>> PeekableRevWalk<I, W> {
         self.peeked.as_ref()
     }
 
+    #[cfg_attr(not(test), expect(dead_code))]
     pub fn next_if(
         &mut self,
         index: &I,
@@ -245,16 +247,21 @@ impl<I, W: RevWalk<I>> FusedIterator for RevWalkOwnedIndexIter<I, W> {}
 pub(super) trait RevWalkIndex {
     type Position: Copy + Ord;
     type AdjacentPositions: IntoIterator<Item = Self::Position> + AsRef<[Self::Position]>;
+    type Error;
 
-    fn adjacent_positions(&self, pos: Self::Position) -> Self::AdjacentPositions;
+    fn adjacent_positions(
+        &self,
+        pos: Self::Position,
+    ) -> Result<Self::AdjacentPositions, Self::Error>;
 }
 
-impl RevWalkIndex for CompositeIndex {
+impl RevWalkIndex for Arc<dyn PositionIndex> {
     type Position = GlobalCommitPosition;
-    type AdjacentPositions = SmallGlobalCommitPositionsVec;
+    type AdjacentPositions = Vec<GlobalCommitPosition>;
+    type Error = IndexError;
 
-    fn adjacent_positions(&self, pos: Self::Position) -> Self::AdjacentPositions {
-        self.commits().entry_by_pos(pos).parent_positions()
+    fn adjacent_positions(&self, pos: Self::Position) -> IndexResult<Self::AdjacentPositions> {
+        Ok(self.entry_by_position(pos)?.parent_positions)
     }
 }
 
@@ -268,21 +275,21 @@ type DescendantIndexPositionsVec = SmallVec<[Reverse<GlobalCommitPosition>; 4]>;
 
 impl RevWalkDescendantsIndex {
     fn build(
-        index: &CompositeCommitIndex,
+        index: &dyn PositionIndex,
         positions: impl IntoIterator<Item = GlobalCommitPosition>,
-    ) -> Self {
+    ) -> IndexResult<Self> {
         // For dense set, it's probably cheaper to use `Vec` instead of `HashMap`.
         let mut children_map: HashMap<GlobalCommitPosition, DescendantIndexPositionsVec> =
             HashMap::new();
         for pos in positions {
             children_map.entry(pos).or_default(); // mark head node
-            for parent_pos in index.entry_by_pos(pos).parent_positions() {
+            for parent_pos in index.entry_by_position(pos)?.parent_positions {
                 let parent = children_map.entry(parent_pos).or_default();
                 parent.push(Reverse(pos));
             }
         }
 
-        Self { children_map }
+        Ok(Self { children_map })
     }
 
     fn contains_pos(&self, pos: GlobalCommitPosition) -> bool {
@@ -293,23 +300,24 @@ impl RevWalkDescendantsIndex {
 impl RevWalkIndex for RevWalkDescendantsIndex {
     type Position = Reverse<GlobalCommitPosition>;
     type AdjacentPositions = DescendantIndexPositionsVec;
+    type Error = IndexError;
 
-    fn adjacent_positions(&self, pos: Self::Position) -> Self::AdjacentPositions {
-        self.children_map[&pos.0].clone()
+    fn adjacent_positions(&self, pos: Self::Position) -> IndexResult<Self::AdjacentPositions> {
+        Ok(self.children_map[&pos.0].clone())
     }
 }
 
 #[derive(Clone)]
 #[must_use]
 pub(super) struct RevWalkBuilder<'a> {
-    index: &'a CompositeIndex,
+    index: &'a Arc<dyn PositionIndex>,
     wanted: Vec<GlobalCommitPosition>,
     unwanted: Vec<GlobalCommitPosition>,
     wanted_parents_range: Range<u32>,
 }
 
 impl<'a> RevWalkBuilder<'a> {
-    pub fn new(index: &'a CompositeIndex) -> Self {
+    pub fn new(index: &'a Arc<dyn PositionIndex>) -> Self {
         Self {
             index,
             wanted: Vec::new(),
@@ -410,19 +418,19 @@ impl<'a> RevWalkBuilder<'a> {
     pub fn descendants(
         self,
         root_positions: HashSet<GlobalCommitPosition>,
-    ) -> RevWalkDescendants<'a> {
+    ) -> IndexResult<RevWalkDescendants<'a>> {
         let index = self.index;
         let candidate_positions = self
             .ancestors_until_roots(root_positions.iter().copied())
-            .collect();
-        RevWalkBorrowedIndexIter {
+            .collect::<IndexResult<Vec<_>>>()?;
+        Ok(RevWalkBorrowedIndexIter {
             index,
             walk: RevWalkDescendantsImpl {
                 candidate_positions,
                 root_positions,
                 reachable_positions: HashSet::new(),
             },
-        }
+        })
     }
 
     /// Fully consumes ancestors and walks back from the `root_positions` within
@@ -436,10 +444,12 @@ impl<'a> RevWalkBuilder<'a> {
         self,
         root_positions: Vec<GlobalCommitPosition>,
         generation_range: Range<u32>,
-    ) -> RevWalkDescendantsGenerationRange {
+    ) -> IndexResult<RevWalkDescendantsGenerationRange> {
         let index = self.index;
-        let positions = self.ancestors_until_roots(root_positions.iter().copied());
-        let descendants_index = RevWalkDescendantsIndex::build(index.commits(), positions);
+        let positions = self
+            .ancestors_until_roots(root_positions.iter().copied())
+            .collect::<IndexResult<Vec<_>>>()?;
+        let descendants_index = RevWalkDescendantsIndex::build(index.as_ref(), positions)?;
 
         let mut wanted_queue = RevWalkQueue::with_min_pos(Reverse(GlobalCommitPosition::MAX));
         let unwanted_queue = RevWalkQueue::with_min_pos(Reverse(GlobalCommitPosition::MAX));
@@ -450,7 +460,7 @@ impl<'a> RevWalkBuilder<'a> {
                 wanted_queue.push(Reverse(pos), Reverse(item_range));
             }
         }
-        RevWalkOwnedIndexIter {
+        Ok(RevWalkOwnedIndexIter {
             index: descendants_index,
             walk: RevWalkGenerationRangeImpl {
                 wanted_queue,
@@ -460,12 +470,12 @@ impl<'a> RevWalkBuilder<'a> {
                 wanted_parents_range: PARENTS_RANGE_FULL,
                 generation_end: generation_range.end,
             },
-        }
+        })
     }
 }
 
 pub(super) type RevWalkAncestors<'a> =
-    RevWalkBorrowedIndexIter<'a, CompositeIndex, RevWalkImpl<GlobalCommitPosition>>;
+    RevWalkBorrowedIndexIter<'a, Arc<dyn PositionIndex>, RevWalkImpl<GlobalCommitPosition>>;
 
 #[derive(Clone)]
 #[must_use]
@@ -476,29 +486,37 @@ pub(super) struct RevWalkImpl<P> {
 }
 
 impl<I: RevWalkIndex + ?Sized> RevWalk<I> for RevWalkImpl<I::Position> {
-    type Item = I::Position;
+    type Item = Result<I::Position, I::Error>;
 
     fn next(&mut self, index: &I) -> Option<Self::Item> {
         while let Some(item) = self.wanted_queue.pop() {
             self.wanted_queue.skip_while_eq(&item.pos);
-            if flush_queue_until(&mut self.unwanted_queue, index, item.pos).is_some() {
-                continue;
+            match flush_queue_until(&mut self.unwanted_queue, index, item.pos) {
+                Ok(Some(_)) => continue,
+                Ok(None) => {}
+                Err(err) => return Some(Err(err)),
             }
-            let parents = index.adjacent_positions(item.pos);
+            let parents = match index.adjacent_positions(item.pos) {
+                Ok(parents) => parents,
+                Err(err) => return Some(Err(err)),
+            };
             self.wanted_queue.extend(
                 filter_slice_by_range(parents.as_ref(), &self.wanted_parents_range)
                     .iter()
                     .copied(),
                 (),
             );
-            return Some(item.pos);
+            return Some(Ok(item.pos));
         }
         None
     }
 }
 
-pub(super) type RevWalkAncestorsGenerationRange<'a> =
-    RevWalkBorrowedIndexIter<'a, CompositeIndex, RevWalkGenerationRangeImpl<GlobalCommitPosition>>;
+pub(super) type RevWalkAncestorsGenerationRange<'a> = RevWalkBorrowedIndexIter<
+    'a,
+    Arc<dyn PositionIndex>,
+    RevWalkGenerationRangeImpl<GlobalCommitPosition>,
+>;
 pub(super) type RevWalkDescendantsGenerationRange = RevWalkOwnedIndexIter<
     RevWalkDescendantsIndex,
     RevWalkGenerationRangeImpl<Reverse<GlobalCommitPosition>>,
@@ -520,35 +538,41 @@ impl<P: Copy + Ord> RevWalkGenerationRangeImpl<P> {
         index: &I,
         pos: P,
         generation: RevWalkItemGenerationRange,
-    ) where
+    ) -> Result<(), I::Error>
+    where
         I: RevWalkIndex<Position = P> + ?Sized,
     {
         // `gen.start` is incremented from 0, which should never overflow
         if generation.start + 1 >= self.generation_end {
-            return;
+            return Ok(());
         }
         let succ_generation = RevWalkItemGenerationRange {
             start: generation.start + 1,
             end: generation.end.saturating_add(1),
         };
-        let parents = index.adjacent_positions(pos);
+        let parents = index.adjacent_positions(pos)?;
         self.wanted_queue.extend(
             filter_slice_by_range(parents.as_ref(), &self.wanted_parents_range)
                 .iter()
                 .copied(),
             Reverse(succ_generation),
         );
+        Ok(())
     }
 }
 
 impl<I: RevWalkIndex + ?Sized> RevWalk<I> for RevWalkGenerationRangeImpl<I::Position> {
-    type Item = I::Position;
+    type Item = Result<I::Position, I::Error>;
 
     fn next(&mut self, index: &I) -> Option<Self::Item> {
         while let Some(item) = self.wanted_queue.pop() {
-            if flush_queue_until(&mut self.unwanted_queue, index, item.pos).is_some() {
-                self.wanted_queue.skip_while_eq(&item.pos);
-                continue;
+            match flush_queue_until(&mut self.unwanted_queue, index, item.pos) {
+                Ok(Some(_)) => {
+                    self.wanted_queue.skip_while_eq(&item.pos);
+                    continue;
+                }
+                Ok(None) => {}
+                Err(err) => return Some(Err(err)),
             }
             let Reverse(mut pending_gen) = item.value;
             let mut some_in_range = pending_gen.contains_end(self.generation_end);
@@ -562,13 +586,17 @@ impl<I: RevWalkIndex + ?Sized> RevWalk<I> for RevWalkGenerationRangeImpl<I::Posi
                 pending_gen = if let Some(merged) = pending_gen.try_merge_end(generation) {
                     merged
                 } else {
-                    self.enqueue_wanted_adjacents(index, item.pos, pending_gen);
+                    if let Err(err) = self.enqueue_wanted_adjacents(index, item.pos, pending_gen) {
+                        return Some(Err(err));
+                    }
                     generation
                 };
             }
-            self.enqueue_wanted_adjacents(index, item.pos, pending_gen);
+            if let Err(err) = self.enqueue_wanted_adjacents(index, item.pos, pending_gen) {
+                return Some(Err(err));
+            }
             if some_in_range {
-                return Some(item.pos);
+                return Some(Ok(item.pos));
             }
         }
         None
@@ -619,20 +647,20 @@ fn flush_queue_until<I: RevWalkIndex + ?Sized>(
     queue: &mut RevWalkQueue<I::Position, ()>,
     index: &I,
     bottom_pos: I::Position,
-) -> Option<RevWalkWorkItem<I::Position, ()>> {
+) -> Result<Option<RevWalkWorkItem<I::Position, ()>>, I::Error> {
     while let Some(item) = queue.pop_if(|x| x.pos >= bottom_pos) {
         queue.skip_while_eq(&item.pos);
-        queue.extend(index.adjacent_positions(item.pos), ());
+        queue.extend(index.adjacent_positions(item.pos)?, ());
         if item.pos == bottom_pos {
-            return Some(item);
+            return Ok(Some(item));
         }
     }
-    None
+    Ok(None)
 }
 
 /// Walks descendants from the roots, in order of ascending index position.
 pub(super) type RevWalkDescendants<'a> =
-    RevWalkBorrowedIndexIter<'a, CompositeIndex, RevWalkDescendantsImpl>;
+    RevWalkBorrowedIndexIter<'a, Arc<dyn PositionIndex>, RevWalkDescendantsImpl>;
 
 #[derive(Clone)]
 #[must_use]
@@ -647,27 +675,32 @@ impl RevWalkDescendants<'_> {
     ///
     /// This is equivalent to `.collect()` on the new iterator, but returns the
     /// internal buffer instead.
-    pub fn collect_positions_set(mut self) -> HashSet<GlobalCommitPosition> {
-        self.by_ref().for_each(drop);
-        self.walk.reachable_positions
+    pub fn collect_positions_set(mut self) -> IndexResult<HashSet<GlobalCommitPosition>> {
+        self.by_ref().collect::<IndexResult<Vec<_>>>()?;
+        Ok(self.walk.reachable_positions)
     }
 }
 
-impl RevWalk<CompositeIndex> for RevWalkDescendantsImpl {
-    type Item = GlobalCommitPosition;
+impl RevWalk<Arc<dyn PositionIndex>> for RevWalkDescendantsImpl {
+    type Item = IndexResult<GlobalCommitPosition>;
 
-    fn next(&mut self, index: &CompositeIndex) -> Option<Self::Item> {
-        let index = index.commits();
+    fn next(&mut self, index: &Arc<dyn PositionIndex>) -> Option<Self::Item> {
         while let Some(candidate_pos) = self.candidate_positions.pop() {
-            if self.root_positions.contains(&candidate_pos)
-                || index
-                    .entry_by_pos(candidate_pos)
-                    .parent_positions()
+            let is_reachable = if self.root_positions.contains(&candidate_pos) {
+                true
+            } else {
+                let entry = match index.entry_by_position(candidate_pos) {
+                    Ok(entry) => entry,
+                    Err(err) => return Some(Err(err)),
+                };
+                entry
+                    .parent_positions
                     .iter()
                     .any(|parent_pos| self.reachable_positions.contains(parent_pos))
-            {
+            };
+            if is_reachable {
                 self.reachable_positions.insert(candidate_pos);
-                return Some(candidate_pos);
+                return Some(Ok(candidate_pos));
             }
         }
         None
@@ -709,12 +742,12 @@ mod tests {
     }
 
     fn to_positions_vec(
-        index: &CompositeIndex,
+        index: &dyn PositionIndex,
         commit_ids: &[CommitId],
     ) -> Vec<GlobalCommitPosition> {
         commit_ids
             .iter()
-            .map(|id| index.commits().commit_id_to_pos(id).unwrap())
+            .map(|id| index.position_by_commit_id(id).unwrap().unwrap())
             .collect()
     }
 
@@ -787,14 +820,14 @@ mod tests {
         index.add_commit_data(id_3.clone(), new_change_id(), &[id_2.clone()]);
         index.add_commit_data(id_4.clone(), new_change_id(), &[id_1.clone()]);
         index.add_commit_data(id_5.clone(), new_change_id(), &[id_4.clone(), id_2.clone()]);
+        let index: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
 
         let walk_commit_ids = |wanted: &[CommitId], unwanted: &[CommitId]| {
-            let index = index.as_composite();
-            RevWalkBuilder::new(index)
-                .wanted_heads(to_positions_vec(index, wanted))
-                .unwanted_roots(to_positions_vec(index, unwanted))
+            RevWalkBuilder::new(&index)
+                .wanted_heads(to_positions_vec(index.as_ref(), wanted))
+                .unwanted_roots(to_positions_vec(index.as_ref(), unwanted))
                 .ancestors()
-                .map(|pos| index.commits().entry_by_pos(pos).commit_id())
+                .map(|pos| index.entry_by_position(pos.unwrap()).unwrap().commit_id)
                 .collect_vec()
         };
 
@@ -876,13 +909,15 @@ mod tests {
         index.add_commit_data(id_6.clone(), new_change_id(), &[id_5.clone()]);
         index.add_commit_data(id_7.clone(), new_change_id(), &[id_3.clone()]);
 
-        let index = index.as_composite();
+        let index: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
         let make_iter = |heads: &[CommitId], roots: &[CommitId]| {
-            RevWalkBuilder::new(index)
-                .wanted_heads(to_positions_vec(index, heads))
-                .ancestors_until_roots(to_positions_vec(index, roots))
+            RevWalkBuilder::new(&index)
+                .wanted_heads(to_positions_vec(index.as_ref(), heads))
+                .ancestors_until_roots(to_positions_vec(index.as_ref(), roots))
         };
-        let to_commit_id = |pos| index.commits().entry_by_pos(pos).commit_id();
+        let to_commit_id = |pos: IndexResult<GlobalCommitPosition>| {
+            index.entry_by_position(pos.unwrap()).unwrap().commit_id
+        };
 
         let mut iter = make_iter(&[id_6.clone(), id_7.clone()], &[id_3.clone()]);
         assert_eq!(iter.walk.wanted_queue.len(), 2);
@@ -936,14 +971,14 @@ mod tests {
         index.add_commit_data(id_6.clone(), new_change_id(), &[id_5.clone()]);
         index.add_commit_data(id_7.clone(), new_change_id(), &[id_4.clone()]);
         index.add_commit_data(id_8.clone(), new_change_id(), &[id_7.clone()]);
+        let index: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
 
         let walk_commit_ids = |wanted: &[CommitId], unwanted: &[CommitId], range: Range<u32>| {
-            let index = index.as_composite();
-            RevWalkBuilder::new(index)
-                .wanted_heads(to_positions_vec(index, wanted))
-                .unwanted_roots(to_positions_vec(index, unwanted))
+            RevWalkBuilder::new(&index)
+                .wanted_heads(to_positions_vec(index.as_ref(), wanted))
+                .unwanted_roots(to_positions_vec(index.as_ref(), unwanted))
                 .ancestors_filtered_by_generation(range)
-                .map(|pos| index.commits().entry_by_pos(pos).commit_id())
+                .map(|pos| index.entry_by_position(pos.unwrap()).unwrap().commit_id)
                 .collect_vec()
         };
 
@@ -1014,13 +1049,13 @@ mod tests {
             new_change_id(),
             &[id_branch5_0.clone()],
         );
+        let index: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
 
         let walk_commit_ids = |wanted: &[CommitId], range: Range<u32>| {
-            let index = index.as_composite();
-            RevWalkBuilder::new(index)
-                .wanted_heads(to_positions_vec(index, wanted))
+            RevWalkBuilder::new(&index)
+                .wanted_heads(to_positions_vec(index.as_ref(), wanted))
                 .ancestors_filtered_by_generation(range)
-                .map(|pos| index.commits().entry_by_pos(pos).commit_id())
+                .map(|pos| index.entry_by_position(pos.unwrap()).unwrap().commit_id)
                 .collect_vec()
         };
 
@@ -1083,14 +1118,18 @@ mod tests {
         index.add_commit_data(id_6.clone(), new_change_id(), &[id_5.clone()]);
         index.add_commit_data(id_7.clone(), new_change_id(), &[id_4.clone()]);
         index.add_commit_data(id_8.clone(), new_change_id(), &[id_7.clone()]);
+        let index: Arc<dyn PositionIndex> = Arc::new(index.as_composite().clone());
 
         let visible_heads = [&id_6, &id_8].map(Clone::clone);
         let walk_commit_ids = |roots: &[CommitId], heads: &[CommitId], range: Range<u32>| {
-            let index = index.as_composite();
-            RevWalkBuilder::new(index)
-                .wanted_heads(to_positions_vec(index, heads))
-                .descendants_filtered_by_generation(to_positions_vec(index, roots), range)
-                .map(|Reverse(pos)| index.commits().entry_by_pos(pos).commit_id())
+            RevWalkBuilder::new(&index)
+                .wanted_heads(to_positions_vec(index.as_ref(), heads))
+                .descendants_filtered_by_generation(to_positions_vec(index.as_ref(), roots), range)
+                .unwrap()
+                .map(|result| {
+                    let Reverse(pos) = result.unwrap();
+                    index.entry_by_position(pos).unwrap().commit_id
+                })
                 .collect_vec()
         };
 
