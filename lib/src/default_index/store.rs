@@ -559,7 +559,7 @@ impl IndexStore for DefaultIndexStore {
         Ok(Box::new(index))
     }
 
-    fn write_index(
+    async fn write_index(
         &self,
         index: Box<dyn MutableIndex>,
         op: &Operation,
