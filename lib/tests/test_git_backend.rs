@@ -171,7 +171,8 @@ fn test_gc() -> TestResult {
     // Empty index, but all kept by file modification time
     // (Beware that this invokes "git gc" and refs will be packed.)
     repo.store()
-        .gc(base_index.as_index(), SystemTime::UNIX_EPOCH).block_on()?;
+        .gc(base_index.as_index(), SystemTime::UNIX_EPOCH)
+        .block_on()?;
     assert_eq!(
         collect_no_gc_refs(git_repo_path),
         hashset! {

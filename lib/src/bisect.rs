@@ -112,7 +112,8 @@ impl<'repo> Bisector<'repo> {
     ) -> Result<Self, BisectionError> {
         let bad_commits = input_range
             .heads()
-            .evaluate(repo)?
+            .evaluate(repo)
+            .await?
             .stream()
             .try_collect()
             .await?;
@@ -204,7 +205,7 @@ impl<'repo> Bisector<'repo> {
     /// commits. Can be used for getting an estimate of how many commits are
     /// left to evaluate.
     pub async fn remaining_revset(&self) -> Result<Box<dyn Revset + 'repo>, BisectionError> {
-        Ok(self.candidates().evaluate(self.repo)?)
+        Ok(self.candidates().evaluate(self.repo).await?)
     }
 
     /// Find the next commit to evaluate, or determine that there are no more
@@ -218,13 +219,13 @@ impl<'repo> Bisector<'repo> {
         // Skipped revisions are simply subtracted from the set.
         // TODO: Handle long ranges of skipped revisions better
         let to_evaluate_expr = self.candidates().bisect().latest(1);
-        let to_evaluate_set = to_evaluate_expr.evaluate(self.repo)?;
+        let to_evaluate_set = to_evaluate_expr.evaluate(self.repo).await?;
         if let Some(commit_id) = pin!(to_evaluate_set.stream()).try_next().await? {
             let commit = self.repo.store().get_commit_async(&commit_id).await?;
             Ok(NextStep::Evaluate(commit))
         } else {
             let bad_expr = RevsetExpression::commits(self.bad_commits.iter().cloned().collect());
-            let bad_roots = bad_expr.roots().evaluate(self.repo)?;
+            let bad_roots = bad_expr.roots().evaluate(self.repo).await?;
             let bad_commits: Vec<_> = bad_roots
                 .stream()
                 .commits(self.repo.store())

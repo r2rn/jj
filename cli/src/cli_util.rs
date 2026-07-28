@@ -1982,7 +1982,8 @@ to the current parents may contain changes from multiple commits.
         let immutable_expr = self.env.resolve_immutable_expression(repo)?;
         let Some(commit_id) = immutable_expr
             .intersection(to_rewrite_expr)
-            .evaluate(repo)?
+            .evaluate(repo)
+            .await?
             .stream()
             .try_next()
             .await?
@@ -2007,7 +2008,8 @@ to the current parents may contain changes from multiple commits.
 
             let (lower_bound, upper_bound) = immutable_expr
                 .intersection(&to_rewrite_expr.descendants())
-                .evaluate(repo)?
+                .evaluate(repo)
+                .await?
                 .count_estimate()?;
             let exact = upper_bound == Some(lower_bound);
             let or_more = if exact { "" } else { " or more" };
@@ -2075,6 +2077,7 @@ to the current parents may contain changes from multiple commits.
             let wc_immutable = !immutable_expr
                 .intersection(&RevsetExpression::commit(wc_commit.id().clone()))
                 .evaluate(tx.repo())
+                .await
                 .map_err(snapshot_command_error)?
                 .is_empty()
                 .map_err(snapshot_command_error)?;
@@ -2291,7 +2294,8 @@ to the current parents may contain changes from multiple commits.
             && let Ok(immutable_expr) = self.env.resolve_immutable_expression(tx.repo())
             && !immutable_expr
                 .intersection(&RevsetExpression::commit(wc_commit.id().clone()))
-                .evaluate(tx.repo())?
+                .evaluate(tx.repo())
+                .await?
                 .is_empty()?
         {
             let new_wc_commit = tx
@@ -2428,7 +2432,8 @@ to the current parents may contain changes from multiple commits.
         let get_commits =
             async |expr: Arc<ResolvedRevsetExpression>| -> Result<Vec<Commit>, CommandError> {
                 let commits = expr
-                    .evaluate(new_repo)?
+                    .evaluate(new_repo)
+                    .await?
                     .stream()
                     .commits(new_repo.store())
                     .try_collect()
@@ -2526,7 +2531,8 @@ to the current parents may contain changes from multiple commits.
         let only_one_conflicted_commit = conflicted_commits.len() == 1;
         let root_conflicts_revset = RevsetExpression::commits(conflicted_commits)
             .roots()
-            .evaluate(repo)?;
+            .evaluate(repo)
+            .await?;
 
         let root_conflict_commits: Vec<_> = root_conflicts_revset
             .stream()
@@ -2784,7 +2790,7 @@ impl WorkspaceCommandTransaction<'_> {
     /// commit. If the bookmark is conflicted before the update, it will
     /// remain conflicted after the update, but the conflict will involve
     /// the `move_to` commit instead of the old commit.
-    pub fn advance_bookmarks(
+    pub async fn advance_bookmarks(
         &mut self,
         bookmarks: Vec<AdvanceableBookmark>,
         move_to: &CommitId,
@@ -2792,11 +2798,13 @@ impl WorkspaceCommandTransaction<'_> {
         for bookmark in bookmarks {
             // This removes the old commit ID from the bookmark's RefTarget and
             // replaces it with the `move_to` ID.
-            self.repo_mut().merge_local_bookmark(
-                &bookmark.name,
-                &RefTarget::normal(bookmark.old_commit_id),
-                &RefTarget::normal(move_to.clone()),
-            )?;
+            self.repo_mut()
+                .merge_local_bookmark(
+                    &bookmark.name,
+                    &RefTarget::normal(bookmark.old_commit_id),
+                    &RefTarget::normal(move_to.clone()),
+                )
+                .await?;
         }
         Ok(())
     }
@@ -3521,7 +3529,8 @@ pub async fn compute_commit_location(
             (None, Some(after_commit_ids), None) => {
                 let new_child_ids = RevsetExpression::commits(after_commit_ids.clone())
                     .children()
-                    .evaluate(workspace_command.repo().as_ref())?
+                    .evaluate(workspace_command.repo().as_ref())
+                    .await?
                     .stream()
                     .try_collect()
                     .await?;
@@ -3584,7 +3593,8 @@ async fn ensure_no_commit_loop(
 ) -> Result<(), CommandError> {
     if let Some(commit_id) = children_expression
         .dag_range_to(parents_expression)
-        .evaluate(repo)?
+        .evaluate(repo)
+        .await?
         .stream()
         .try_next()
         .await?

@@ -101,7 +101,8 @@ pub(crate) async fn cmd_describe(
         .check_rewritable_expr(&target_expr)
         .await?;
     let commits: Vec<_> = target_expr
-        .evaluate(workspace_command.repo().as_ref())?
+        .evaluate(workspace_command.repo().as_ref())
+        .await?
         .stream()
         .commits(workspace_command.repo().store()) // in reverse topological order
         .try_collect()

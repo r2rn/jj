@@ -678,19 +678,19 @@ impl UserRevsetExpression {
 
 impl ResolvedRevsetExpression {
     /// Optimizes and evaluates this expression.
-    pub fn evaluate<'index>(
+    pub async fn evaluate<'index>(
         self: Arc<Self>,
         repo: &'index dyn Repo,
     ) -> Result<Box<dyn Revset + 'index>, RevsetEvaluationError> {
         let expr = optimize(self).to_backend_expression(repo);
-        repo.index().evaluate_revset(&expr, repo.store())
+        repo.index().evaluate_revset(&expr, repo.store()).await
     }
 
     /// Evaluates this expression without optimizing it.
     ///
     /// Use this function if `self` is already optimized, or to debug
     /// optimization pass.
-    pub fn evaluate_unoptimized<'index>(
+    pub async fn evaluate_unoptimized<'index>(
         self: &Arc<Self>,
         repo: &'index dyn Repo,
     ) -> Result<Box<dyn Revset + 'index>, RevsetEvaluationError> {
@@ -700,7 +700,7 @@ impl ResolvedRevsetExpression {
             .as_ref()
             .unwrap_or(self)
             .to_backend_expression(repo);
-        repo.index().evaluate_revset(&expr, repo.store())
+        repo.index().evaluate_revset(&expr, repo.store()).await
     }
 
     /// Transforms this expression to the form which the `Index` backend will
@@ -2586,7 +2586,7 @@ pub fn optimize<St: ExpressionState>(
 // TODO: find better place to host this function (or add compile-time revset
 // parsing and resolution like
 // `revset!("{unwanted}..{wanted}").evaluate(repo)`?)
-pub fn walk_revs<'index>(
+pub async fn walk_revs<'index>(
     repo: &'index dyn Repo,
     wanted: &[CommitId],
     unwanted: &[CommitId],
@@ -2594,6 +2594,7 @@ pub fn walk_revs<'index>(
     RevsetExpression::commits(unwanted.to_vec())
         .range(&RevsetExpression::commits(wanted.to_vec()))
         .evaluate(repo)
+        .await
 }
 
 fn reload_repo_at_operation(
@@ -2740,6 +2741,7 @@ impl CommitPrefixResolver<'_> {
             .unwrap_or(IdPrefixIndex::empty());
         match index
             .resolve_commit_prefix(repo, prefix)
+            .block_on()
             .map_err(|err| RevsetResolutionError::Other(err.into()))?
         {
             PrefixResolution::AmbiguousMatch => {
@@ -2784,6 +2786,7 @@ impl ChangePrefixResolver<'_> {
             .unwrap_or(IdPrefixIndex::empty());
         match index
             .resolve_change_prefix(repo, prefix)
+            .block_on()
             .map_err(|err| RevsetResolutionError::Other(err.into()))?
         {
             PrefixResolution::AmbiguousMatch => Err(

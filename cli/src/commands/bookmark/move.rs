@@ -16,7 +16,6 @@ use clap_complete::ArgValueCandidates;
 use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
 use jj_lib::iter_util::fallible_any;
-use jj_lib::iter_util::fallible_find;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
 use jj_lib::str_util::StringExpression;
@@ -113,20 +112,18 @@ pub async fn cmd_bookmark_move(
         return Ok(());
     }
 
-    if !args.allow_backwards
-        && let Some((name, _)) = fallible_find(
-            matched_bookmarks.iter(),
-            |(_, old_target)| -> Result<_, CommandError> {
-                let is_ff = is_fast_forward(repo.as_ref(), old_target, target_commit.id())?;
-                Ok(!is_ff)
-            },
-        )?
-    {
-        return Err(user_error(format!(
-            "Refusing to move bookmark backwards or sideways: {name}",
-            name = name.as_symbol()
-        ))
-        .hinted("Use --allow-backwards to allow it."));
+    if !args.allow_backwards {
+        for (name, old_target) in &matched_bookmarks {
+            let is_ff = is_fast_forward(repo.as_ref(), old_target, target_commit.id()).await?;
+            if is_ff {
+                continue;
+            }
+            return Err(user_error(format!(
+                "Refusing to move bookmark backwards or sideways: {name}",
+                name = name.as_symbol()
+            ))
+            .hinted("Use --allow-backwards to allow it."));
+        }
     }
     if target_commit.is_discardable(repo.as_ref()).await? {
         writeln!(ui.warning_default(), "Target revision is empty.")?;

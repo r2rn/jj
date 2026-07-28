@@ -61,7 +61,7 @@ fn list_dir(dir: &Path) -> Vec<String> {
 }
 
 fn index_has_id(index: &dyn Index, commit_id: &CommitId) -> bool {
-    index.has_id(commit_id).unwrap()
+    index.has_id(commit_id).block_on().unwrap()
 }
 
 #[test]
@@ -533,7 +533,7 @@ fn test_reparent_discarding_predecessors() -> TestResult {
     assert_eq!(repo_2.view().heads().len(), 2);
     assert_eq!(repo_3.view().heads().len(), 2);
     assert_eq!(repo_4.view().heads().len(), 1);
-    assert_eq!(repo_4.index().all_heads_for_gc()?.count(), 3);
+    assert_eq!(repo_4.index().all_heads_for_gc().block_on()?.count(), 3);
     assert!(repo_4.operation().stores_commit_predecessors(),);
     assert_eq!(
         get_predecessors(&repo_4, commit_a1.id()),

@@ -1509,6 +1509,7 @@ impl Backend for GitBackend {
         let git_repo = self.lock_git_repo();
         let new_heads = index
             .all_heads_for_gc()
+            .block_on()
             .map_err(|err| BackendError::Other(err.into()))?
             .filter(|id| *id != self.root_commit_id);
         recreate_no_gc_refs(&git_repo, new_heads, keep_newer)?;

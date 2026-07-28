@@ -1233,7 +1233,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
             let repo = language.repo;
             let out_property = self_property.and_then(|commit| {
                 // The given commit could be hidden in e.g. `jj evolog`.
-                let maybe_targets = repo.resolve_change_id(commit.change_id())?;
+                let maybe_targets = repo.resolve_change_id(commit.change_id()).block_on()?;
                 let divergent = maybe_targets.is_some_and(|targets| targets.is_divergent());
                 Ok(divergent)
             });
@@ -1245,7 +1245,8 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
         |language, _diagnostics, _build_ctx, self_property, function| {
             function.expect_no_arguments()?;
             let repo = language.repo;
-            let out_property = self_property.and_then(|commit| Ok(commit.is_hidden(repo)?));
+            let out_property =
+                self_property.and_then(|commit| Ok(commit.is_hidden(repo).block_on()?));
             Ok(out_property.into_dyn_wrapped())
         },
     );
@@ -1256,7 +1257,7 @@ fn builtin_commit_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, Comm
             let repo = language.repo;
             let out_property = self_property.and_then(|commit| {
                 // The given commit could be hidden in e.g. `jj evolog`.
-                let maybe_targets = repo.resolve_change_id(commit.change_id())?;
+                let maybe_targets = repo.resolve_change_id(commit.change_id()).block_on()?;
                 let offset = maybe_targets
                     .and_then(|targets| targets.find_offset(commit.id()))
                     .map(i64::try_from)
@@ -1430,6 +1431,7 @@ fn evaluate_revset_expression<'repo>(
         .resolve_user_expression(repo, &symbol_resolver)
         .map_err(|err| make_error().with_source(err))?
         .evaluate(repo)
+        .block_on()
         .map_err(|err| make_error().with_source(err))?;
     Ok(revset)
 }
@@ -1684,7 +1686,9 @@ impl CommitRef {
             .get_or_try_init(|| {
                 let self_ids = self.target.added_ids().cloned().collect_vec();
                 let other_ids = tracking.target.added_ids().cloned().collect_vec();
-                Ok(revset::walk_revs(repo, &self_ids, &other_ids)?.count_estimate()?)
+                Ok(revset::walk_revs(repo, &self_ids, &other_ids)
+                    .block_on()?
+                    .count_estimate()?)
             })
             .copied()
     }
@@ -1699,7 +1703,9 @@ impl CommitRef {
             .get_or_try_init(|| {
                 let self_ids = self.target.added_ids().cloned().collect_vec();
                 let other_ids = tracking.target.added_ids().cloned().collect_vec();
-                Ok(revset::walk_revs(repo, &other_ids, &self_ids)?.count_estimate()?)
+                Ok(revset::walk_revs(repo, &other_ids, &self_ids)
+                    .block_on()?
+                    .count_estimate()?)
             })
             .copied()
     }
@@ -2103,7 +2109,7 @@ trait ShortestIdPrefixLen {
 
 impl ShortestIdPrefixLen for ChangeId {
     fn shortest_prefix_len(&self, repo: &dyn Repo, index: &IdPrefixIndex) -> IndexResult<usize> {
-        index.shortest_change_prefix_len(repo, self)
+        index.shortest_change_prefix_len(repo, self).block_on()
     }
 }
 
@@ -2131,7 +2137,7 @@ fn builtin_change_id_methods<'repo>() -> CommitTemplateBuildMethodFnMap<'repo, C
 
 impl ShortestIdPrefixLen for CommitId {
     fn shortest_prefix_len(&self, repo: &dyn Repo, index: &IdPrefixIndex) -> IndexResult<usize> {
-        index.shortest_commit_prefix_len(repo, self)
+        index.shortest_commit_prefix_len(repo, self).block_on()
     }
 }
 

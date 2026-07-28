@@ -85,13 +85,15 @@ pub(crate) async fn cmd_abandon(
             .check_rewritable_expr(&visible_expr)
             .await?;
         let visible: IndexSet<_> = visible_expr
-            .evaluate(workspace_command.repo().as_ref())?
+            .evaluate(workspace_command.repo().as_ref())
+            .await?
             .stream()
             .try_collect()
             .await?;
 
         let targets: Vec<_> = target_expr
-            .evaluate(workspace_command.repo().as_ref())?
+            .evaluate(workspace_command.repo().as_ref())
+            .await?
             .stream()
             .try_collect()
             .await?;

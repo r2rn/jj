@@ -70,7 +70,8 @@ impl DisambiguationData {
             let revset = self
                 .expression
                 .resolve_user_expression(repo, &symbol_resolver)?
-                .evaluate(repo)?;
+                .evaluate(repo)
+                .block_on()?;
 
             let commit_change_ids: Vec<_> = revset.commit_change_ids().try_collect().block_on()?;
             let mut commit_index = IdIndex::with_capacity(commit_change_ids.len());
@@ -158,7 +159,7 @@ impl IdPrefixIndex<'_> {
     }
 
     /// Resolve an unambiguous commit ID prefix.
-    pub fn resolve_commit_prefix(
+    pub async fn resolve_commit_prefix(
         &self,
         repo: &dyn Repo,
         prefix: &HexPrefix,
@@ -174,7 +175,7 @@ impl IdPrefixIndex<'_> {
                 PrefixResolution::SingleMatch(id) => {
                     // The disambiguation set may be loaded from a different repo,
                     // and contain a commit that doesn't exist in the current repo.
-                    if repo.index().has_id(&id)? {
+                    if repo.index().has_id(&id).await? {
                         return Ok(PrefixResolution::SingleMatch(id));
                     } else {
                         return Ok(PrefixResolution::NoMatch);
@@ -185,17 +186,19 @@ impl IdPrefixIndex<'_> {
                 }
             }
         }
-        repo.index().resolve_commit_id_prefix(prefix)
+        repo.index().resolve_commit_id_prefix(prefix).await
     }
 
     /// Returns the shortest length of a prefix of `commit_id` that can still be
     /// resolved by `resolve_commit_prefix()` and [`SymbolResolver`].
-    pub fn shortest_commit_prefix_len(
+    pub async fn shortest_commit_prefix_len(
         &self,
         repo: &dyn Repo,
         commit_id: &CommitId,
     ) -> IndexResult<usize> {
-        let len = self.shortest_commit_prefix_len_exact(repo, commit_id)?;
+        let len = self
+            .shortest_commit_prefix_len_exact(repo, commit_id)
+            .await?;
         Ok(disambiguate_prefix_with_refs(
             repo.view(),
             &commit_id.to_string(),
@@ -203,7 +206,7 @@ impl IdPrefixIndex<'_> {
         ))
     }
 
-    pub fn shortest_commit_prefix_len_exact(
+    pub async fn shortest_commit_prefix_len_exact(
         &self,
         repo: &dyn Repo,
         commit_id: &CommitId,
@@ -215,11 +218,13 @@ impl IdPrefixIndex<'_> {
         {
             return Ok(lookup.shortest_unique_prefix_len());
         }
-        repo.index().shortest_unique_commit_id_prefix_len(commit_id)
+        repo.index()
+            .shortest_unique_commit_id_prefix_len(commit_id)
+            .await
     }
 
     /// Resolve an unambiguous change ID prefix to the commit IDs in the revset.
-    pub fn resolve_change_prefix(
+    pub async fn resolve_change_prefix(
         &self,
         repo: &dyn Repo,
         prefix: &HexPrefix,
@@ -233,7 +238,7 @@ impl IdPrefixIndex<'_> {
                     // Fall back to resolving in entire repo
                 }
                 PrefixResolution::SingleMatch(change_id) => {
-                    return match repo.resolve_change_id(&change_id)? {
+                    return match repo.resolve_change_id(&change_id).await? {
                         // There may be more commits with this change id outside the narrower sets.
                         Some(commit_ids) => Ok(PrefixResolution::SingleMatch(commit_ids)),
                         // The disambiguation set may contain hidden commits.
@@ -245,17 +250,19 @@ impl IdPrefixIndex<'_> {
                 }
             }
         }
-        repo.resolve_change_id_prefix(prefix)
+        repo.resolve_change_id_prefix(prefix).await
     }
 
     /// Returns the shortest length of a prefix of `change_id` that can still be
     /// resolved by `resolve_change_prefix()` and [`SymbolResolver`].
-    pub fn shortest_change_prefix_len(
+    pub async fn shortest_change_prefix_len(
         &self,
         repo: &dyn Repo,
         change_id: &ChangeId,
     ) -> IndexResult<usize> {
-        let len = self.shortest_change_prefix_len_exact(repo, change_id)?;
+        let len = self
+            .shortest_change_prefix_len_exact(repo, change_id)
+            .await?;
         Ok(disambiguate_prefix_with_refs(
             repo.view(),
             &change_id.to_string(),
@@ -263,7 +270,7 @@ impl IdPrefixIndex<'_> {
         ))
     }
 
-    fn shortest_change_prefix_len_exact(
+    async fn shortest_change_prefix_len_exact(
         &self,
         repo: &dyn Repo,
         change_id: &ChangeId,
@@ -275,7 +282,7 @@ impl IdPrefixIndex<'_> {
         {
             return Ok(lookup.shortest_unique_prefix_len());
         }
-        repo.shortest_unique_change_id_prefix_len(change_id)
+        repo.shortest_unique_change_id_prefix_len(change_id).await
     }
 }
 

@@ -25,12 +25,14 @@ use std::path::Path;
 use std::slice;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use futures::StreamExt as _;
 use futures::TryStreamExt as _;
 use futures::future::try_join_all;
 use futures::stream;
 use itertools::Itertools as _;
 use once_cell::sync::OnceCell;
+use pollster::FutureExt as _;
 use thiserror::Error;
 use tracing::instrument;
 
@@ -118,6 +120,7 @@ use crate::tree_merge::MergeOptions;
 use crate::view::RenameWorkspaceError;
 use crate::view::View;
 
+#[async_trait(?Send)]
 pub trait Repo {
     /// Base repository that contains all committed data. Returns `self` if this
     /// is a `ReadonlyRepo`,
@@ -133,25 +136,25 @@ pub trait Repo {
 
     fn submodule_store(&self) -> &Arc<dyn SubmoduleStore>;
 
-    fn resolve_change_id(
+    async fn resolve_change_id(
         &self,
         change_id: &ChangeId,
     ) -> IndexResult<Option<ResolvedChangeTargets>> {
         // Replace this if we added more efficient lookup method.
         let prefix = HexPrefix::from_id(change_id);
-        match self.resolve_change_id_prefix(&prefix)? {
+        match self.resolve_change_id_prefix(&prefix).await? {
             PrefixResolution::NoMatch => Ok(None),
             PrefixResolution::SingleMatch(entries) => Ok(Some(entries)),
             PrefixResolution::AmbiguousMatch => panic!("complete change_id should be unambiguous"),
         }
     }
 
-    fn resolve_change_id_prefix(
+    async fn resolve_change_id_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<ResolvedChangeTargets>>;
 
-    fn shortest_unique_change_id_prefix_len(
+    async fn shortest_unique_change_id_prefix_len(
         &self,
         target_id_bytes: &ChangeId,
     ) -> IndexResult<usize>;
@@ -311,13 +314,16 @@ impl ReadonlyRepo {
         self.index.as_ref()
     }
 
-    fn change_id_index(&self) -> &dyn ChangeIdIndex {
-        self.change_id_index
-            .get_or_init(|| {
-                self.readonly_index()
-                    .change_id_index(&mut self.view().heads().iter())
-            })
-            .as_ref()
+    async fn change_id_index(&self) -> &dyn ChangeIdIndex {
+        if let Some(index) = self.change_id_index.get() {
+            return index.as_ref();
+        }
+        let index = self
+            .readonly_index()
+            .change_id_index(&mut self.view().heads().iter())
+            .await;
+        drop(self.change_id_index.set(index));
+        self.change_id_index.get().unwrap().as_ref()
     }
 
     pub fn op_heads_store(&self) -> &Arc<dyn OpHeadsStore> {
@@ -347,6 +353,7 @@ impl ReadonlyRepo {
     }
 }
 
+#[async_trait(?Send)]
 impl Repo for ReadonlyRepo {
     fn base_repo(&self) -> &ReadonlyRepo {
         self
@@ -372,15 +379,21 @@ impl Repo for ReadonlyRepo {
         self.loader.submodule_store()
     }
 
-    fn resolve_change_id_prefix(
+    async fn resolve_change_id_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<ResolvedChangeTargets>> {
-        self.change_id_index().resolve_prefix(prefix)
+        self.change_id_index().await.resolve_prefix(prefix).await
     }
 
-    fn shortest_unique_change_id_prefix_len(&self, target_id: &ChangeId) -> IndexResult<usize> {
-        self.change_id_index().shortest_unique_prefix_len(target_id)
+    async fn shortest_unique_change_id_prefix_len(
+        &self,
+        target_id: &ChangeId,
+    ) -> IndexResult<usize> {
+        self.change_id_index()
+            .await
+            .shortest_unique_prefix_len(target_id)
+            .await
     }
 }
 
@@ -1250,13 +1263,14 @@ impl MutableRepo {
     async fn update_all_references(&mut self, options: &RewriteRefsOptions) -> BackendResult<()> {
         let rewrite_mapping = self.resolve_rewrite_mapping_with(|_| true)?;
         self.update_local_bookmarks(&rewrite_mapping, options)
+            .await
             // TODO: indexing error shouldn't be a "BackendError"
             .map_err(|err| BackendError::Other(err.into()))?;
         self.update_wc_commits(&rewrite_mapping).await?;
         Ok(())
     }
 
-    fn update_local_bookmarks(
+    async fn update_local_bookmarks(
         &mut self,
         rewrite_mapping: &HashMap<CommitId, Vec<CommitId>>,
         options: &RewriteRefsOptions,
@@ -1286,7 +1300,8 @@ impl MutableRepo {
                 RefTarget::from_merge(MergeBuilder::from_iter(ids).build())
             };
 
-            self.merge_local_bookmark(&bookmark_name, &old_target, &new_target)?;
+            self.merge_local_bookmark(&bookmark_name, &old_target, &new_target)
+                .await?;
         }
         Ok(())
     }
@@ -1347,7 +1362,8 @@ impl MutableRepo {
             .parents()
             .minus(&old_commits_expression);
         let heads_to_add: Vec<_> = heads_to_add_expression
-            .evaluate(self)?
+            .evaluate(self)
+            .await?
             .stream()
             .try_collect()
             .await?;
@@ -1375,6 +1391,7 @@ impl MutableRepo {
                 self.parent_mapping.keys().cloned().collect(),
             ))
             .evaluate(self)
+            .await
             .map_err(|err| err.into_backend_error())?;
         let to_visit = to_visit_revset
             .stream()
@@ -1738,6 +1755,7 @@ impl MutableRepo {
             view.head_ids = self
                 .index()
                 .heads(&mut view.head_ids.iter())
+                .block_on()
                 .unwrap()
                 .into_iter()
                 .collect();
@@ -1799,19 +1817,21 @@ impl MutableRepo {
     /// Adds the given `heads` and ancestor commits to the index without making
     /// them visible. Returns newly-indexed commits.
     pub async fn index_commits(&mut self, heads: &[Commit]) -> BackendResult<Vec<Commit>> {
+        let mut missing_heads = Vec::new();
+        for commit in heads {
+            match self.index().has_id(commit.id()).await {
+                Ok(false) => missing_heads.push(Ok(CommitByCommitterTimestamp(commit.clone()))),
+                Ok(true) => {}
+                // TODO: indexing error shouldn't be a "BackendError"
+                Err(err) => missing_heads.push(Err(BackendError::Other(err.into()))),
+            }
+        }
         let missing_commits = dag_walk_async::topo_order_reverse_ord(
-            heads
-                .iter()
-                .filter_map(|commit| match self.index().has_id(commit.id()) {
-                    Ok(false) => Some(Ok(CommitByCommitterTimestamp(commit.clone()))),
-                    Ok(true) => None,
-                    // TODO: indexing error shouldn't be a "BackendError"
-                    Err(err) => Some(Err(BackendError::Other(err.into()))),
-                }),
+            missing_heads,
             |CommitByCommitterTimestamp(commit)| commit.id().clone(),
             async |CommitByCommitterTimestamp(commit)| {
                 stream::iter(commit.parent_ids())
-                    .filter_map(async |id| match self.index().has_id(id) {
+                    .filter_map(async |id| match self.index().has_id(id).await {
                         Ok(false) => Some(
                             self.store()
                                 .get_commit_async(id)
@@ -1855,7 +1875,7 @@ impl MutableRepo {
         self.view.mark_dirty();
     }
 
-    pub fn merge_local_bookmark(
+    pub async fn merge_local_bookmark(
         &mut self,
         name: &RefName,
         base_target: &RefTarget,
@@ -1864,7 +1884,7 @@ impl MutableRepo {
         let view = self.view.get_mut();
         let index = self.index.as_index();
         let self_target = view.get_local_bookmark(name);
-        let new_target = merge_ref_targets(index, self_target, base_target, other_target)?;
+        let new_target = merge_ref_targets(index, self_target, base_target, other_target).await?;
         self.set_local_bookmark_target(name, new_target);
         Ok(())
     }
@@ -1878,7 +1898,7 @@ impl MutableRepo {
         self.view_mut().set_remote_bookmark(symbol, remote_ref);
     }
 
-    fn merge_remote_bookmark(
+    async fn merge_remote_bookmark(
         &mut self,
         symbol: RemoteRefSymbol<'_>,
         base_ref: &RemoteRef,
@@ -1887,17 +1907,18 @@ impl MutableRepo {
         let view = self.view.get_mut();
         let index = self.index.as_index();
         let self_ref = view.get_remote_bookmark(symbol);
-        let new_ref = merge_remote_refs(index, self_ref, base_ref, other_ref)?;
+        let new_ref = merge_remote_refs(index, self_ref, base_ref, other_ref).await?;
         view.set_remote_bookmark(symbol, new_ref);
         Ok(())
     }
 
     /// Merges the specified remote bookmark in to local bookmark, and starts
     /// tracking it.
-    pub fn track_remote_bookmark(&mut self, symbol: RemoteRefSymbol<'_>) -> IndexResult<()> {
+    pub async fn track_remote_bookmark(&mut self, symbol: RemoteRefSymbol<'_>) -> IndexResult<()> {
         let mut remote_ref = self.get_remote_bookmark(symbol);
         let base_target = remote_ref.tracked_target();
-        self.merge_local_bookmark(symbol.name, base_target, &remote_ref.target)?;
+        self.merge_local_bookmark(symbol.name, base_target, &remote_ref.target)
+            .await?;
         remote_ref.state = RemoteRefState::Tracked;
         self.set_remote_bookmark(symbol, remote_ref);
         Ok(())
@@ -1930,7 +1951,7 @@ impl MutableRepo {
         self.view_mut().set_local_tag_target(name, target);
     }
 
-    pub fn merge_local_tag(
+    pub async fn merge_local_tag(
         &mut self,
         name: &RefName,
         base_target: &RefTarget,
@@ -1939,7 +1960,7 @@ impl MutableRepo {
         let view = self.view.get_mut();
         let index = self.index.as_index();
         let self_target = view.get_local_tag(name);
-        let new_target = merge_ref_targets(index, self_target, base_target, other_target)?;
+        let new_target = merge_ref_targets(index, self_target, base_target, other_target).await?;
         view.set_local_tag_target(name, new_target);
         Ok(())
     }
@@ -1952,7 +1973,7 @@ impl MutableRepo {
         self.view_mut().set_remote_tag(symbol, remote_ref);
     }
 
-    fn merge_remote_tag(
+    async fn merge_remote_tag(
         &mut self,
         symbol: RemoteRefSymbol<'_>,
         base_ref: &RemoteRef,
@@ -1961,7 +1982,7 @@ impl MutableRepo {
         let view = self.view.get_mut();
         let index = self.index.as_index();
         let self_ref = view.get_remote_tag(symbol);
-        let new_ref = merge_remote_refs(index, self_ref, base_ref, other_ref)?;
+        let new_ref = merge_remote_refs(index, self_ref, base_ref, other_ref).await?;
         view.set_remote_tag(symbol, new_ref);
         Ok(())
     }
@@ -1974,7 +1995,7 @@ impl MutableRepo {
         self.view_mut().set_git_ref_target(name, target);
     }
 
-    fn merge_git_ref(
+    async fn merge_git_ref(
         &mut self,
         name: &GitRefName,
         base_target: &RefTarget,
@@ -1983,7 +2004,7 @@ impl MutableRepo {
         let view = self.view.get_mut();
         let index = self.index.as_index();
         let self_target = view.get_git_ref(name);
-        let new_target = merge_ref_targets(index, self_target, base_target, other_target)?;
+        let new_target = merge_ref_targets(index, self_target, base_target, other_target).await?;
         view.set_git_ref_target(name, new_target);
         Ok(())
     }
@@ -2056,29 +2077,32 @@ impl MutableRepo {
         let changed_local_bookmarks =
             diff_named_ref_targets(base.local_bookmarks(), other.local_bookmarks());
         for (name, (base_target, other_target)) in changed_local_bookmarks {
-            self.merge_local_bookmark(name, base_target, other_target)?;
+            self.merge_local_bookmark(name, base_target, other_target)
+                .await?;
         }
 
         let changed_local_tags = diff_named_ref_targets(base.local_tags(), other.local_tags());
         for (name, (base_target, other_target)) in changed_local_tags {
-            self.merge_local_tag(name, base_target, other_target)?;
+            self.merge_local_tag(name, base_target, other_target)
+                .await?;
         }
 
         let changed_git_refs = diff_named_ref_targets(base.git_refs(), other.git_refs());
         for (name, (base_target, other_target)) in changed_git_refs {
-            self.merge_git_ref(name, base_target, other_target)?;
+            self.merge_git_ref(name, base_target, other_target).await?;
         }
 
         let changed_remote_bookmarks =
             diff_named_remote_refs(base.all_remote_bookmarks(), other.all_remote_bookmarks());
         for (symbol, (base_ref, other_ref)) in changed_remote_bookmarks {
-            self.merge_remote_bookmark(symbol, base_ref, other_ref)?;
+            self.merge_remote_bookmark(symbol, base_ref, other_ref)
+                .await?;
         }
 
         let changed_remote_tags =
             diff_named_remote_refs(base.all_remote_tags(), other.all_remote_tags());
         for (symbol, (base_ref, other_ref)) in changed_remote_tags {
-            self.merge_remote_tag(symbol, base_ref, other_ref)?;
+            self.merge_remote_tag(symbol, base_ref, other_ref).await?;
         }
 
         let new_git_head_target = merge_ref_targets(
@@ -2086,7 +2110,8 @@ impl MutableRepo {
             self.view().git_head(),
             base.git_head(),
             other.git_head(),
-        )?;
+        )
+        .await?;
         self.set_git_head_target(new_git_head_target);
 
         Ok(())
@@ -2102,6 +2127,7 @@ impl MutableRepo {
         let mut removed_changes: HashMap<ChangeId, Vec<CommitId>> = HashMap::new();
         {
             let mut stream = revset::walk_revs(self, old_heads, new_heads)
+                .await
                 .map_err(|err| err.into_backend_error())?
                 .commit_change_ids();
             while let Some((commit_id, change_id)) = stream
@@ -2123,6 +2149,7 @@ impl MutableRepo {
         let mut rewritten_commits: HashMap<CommitId, Vec<CommitId>> = HashMap::new();
         {
             let mut stream = revset::walk_revs(self, new_heads, old_heads)
+                .await
                 .map_err(|err| err.into_backend_error())?
                 .commit_change_ids();
             while let Some((commit_id, change_id)) = stream
@@ -2165,6 +2192,7 @@ impl MutableRepo {
     }
 }
 
+#[async_trait(?Send)]
 impl Repo for MutableRepo {
     fn base_repo(&self) -> &ReadonlyRepo {
         &self.base_repo
@@ -2191,17 +2219,26 @@ impl Repo for MutableRepo {
         self.base_repo.submodule_store()
     }
 
-    fn resolve_change_id_prefix(
+    async fn resolve_change_id_prefix(
         &self,
         prefix: &HexPrefix,
     ) -> IndexResult<PrefixResolution<ResolvedChangeTargets>> {
-        let change_id_index = self.index.change_id_index(&mut self.view().heads().iter());
-        change_id_index.resolve_prefix(prefix)
+        let change_id_index = self
+            .index
+            .change_id_index(&mut self.view().heads().iter())
+            .await;
+        change_id_index.resolve_prefix(prefix).await
     }
 
-    fn shortest_unique_change_id_prefix_len(&self, target_id: &ChangeId) -> IndexResult<usize> {
-        let change_id_index = self.index.change_id_index(&mut self.view().heads().iter());
-        change_id_index.shortest_unique_prefix_len(target_id)
+    async fn shortest_unique_change_id_prefix_len(
+        &self,
+        target_id: &ChangeId,
+    ) -> IndexResult<usize> {
+        let change_id_index = self
+            .index
+            .change_id_index(&mut self.view().heads().iter())
+            .await;
+        change_id_index.shortest_unique_prefix_len(target_id).await
     }
 }
 

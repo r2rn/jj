@@ -89,7 +89,8 @@ pub async fn cmd_sign(
         .await?;
 
     let to_sign: IndexSet<Commit> = revset_expression
-        .evaluate(workspace_command.repo().as_ref())?
+        .evaluate(workspace_command.repo().as_ref())
+        .await?
         .stream()
         .commits(workspace_command.repo().store())
         .try_collect()

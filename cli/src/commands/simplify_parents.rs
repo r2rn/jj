@@ -63,7 +63,8 @@ pub(crate) async fn cmd_simplify_parents(
     };
     workspace_command.check_rewritable_expr(&revs).await?;
     let commit_ids: Vec<_> = revs
-        .evaluate(workspace_command.repo().as_ref())?
+        .evaluate(workspace_command.repo().as_ref())
+        .await?
         .stream()
         .try_collect()
         .await?;
@@ -83,6 +84,7 @@ pub(crate) async fn cmd_simplify_parents(
                 // the error does not come from `Backend`, but `Index`.
                 rewriter
                     .simplify_ancestor_merge()
+                    .await
                     .map_err(|err| BackendError::Other(err.into()))?;
             }
             let num_new_heads = rewriter.new_parents().len();

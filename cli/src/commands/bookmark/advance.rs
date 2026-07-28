@@ -17,7 +17,6 @@ use clap_complete::ArgValueCompleter;
 use itertools::Itertools as _;
 use jj_lib::dsl_util::ExpressionNode;
 use jj_lib::iter_util::fallible_any;
-use jj_lib::iter_util::fallible_find;
 use jj_lib::object_id::ObjectId as _;
 use jj_lib::op_store::RefTarget;
 use jj_lib::revset;
@@ -165,13 +164,11 @@ pub async fn cmd_bookmark_advance(
         return Ok(());
     }
 
-    if let Some((name, _)) = fallible_find(
-        matched_bookmarks.iter(),
-        |(_, old_target)| -> Result<_, CommandError> {
-            let is_ff = is_fast_forward(repo.as_ref(), old_target, target_commit.id())?;
-            Ok(!is_ff)
-        },
-    )? {
+    for (name, old_target) in &matched_bookmarks {
+        let is_ff = is_fast_forward(repo.as_ref(), old_target, target_commit.id()).await?;
+        if is_ff {
+            continue;
+        }
         return Err(user_error(format!(
             "Refusing to advance bookmark backwards or sideways: {name}",
             name = name.as_symbol()

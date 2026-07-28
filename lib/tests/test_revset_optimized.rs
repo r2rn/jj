@@ -163,8 +163,12 @@ fn verify_optimized(
     repo: &dyn Repo,
     expression: &Arc<ResolvedRevsetExpression>,
 ) -> Result<(), TestCaseError> {
-    let optimized_revset = expression.clone().evaluate(repo).unwrap();
-    let unoptimized_revset = expression.clone().evaluate_unoptimized(repo).unwrap();
+    let optimized_revset = expression.clone().evaluate(repo).block_on().unwrap();
+    let unoptimized_revset = expression
+        .clone()
+        .evaluate_unoptimized(repo)
+        .block_on()
+        .unwrap();
     let optimized_ids: Vec<_> = optimized_revset.stream().try_collect().block_on().unwrap();
     let unoptimized_ids: Vec<_> = unoptimized_revset
         .stream()

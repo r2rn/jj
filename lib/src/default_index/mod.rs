@@ -55,6 +55,7 @@ mod tests {
     use std::sync::Arc;
 
     use itertools::Itertools as _;
+    use pollster::FutureExt as _;
     use smallvec::smallvec_inline;
     use test_case::test_case;
 
@@ -109,7 +110,7 @@ mod tests {
         set1: &[CommitId],
         set2: &[CommitId],
     ) -> Vec<CommitId> {
-        index.common_ancestors(set1, set2).unwrap()
+        index.common_ancestors(set1, set2).block_on().unwrap()
     }
 
     fn is_ancestor(
@@ -117,7 +118,10 @@ mod tests {
         ancestor_id: &CommitId,
         descendant_id: &CommitId,
     ) -> bool {
-        index.is_ancestor(ancestor_id, descendant_id).unwrap()
+        index
+            .is_ancestor(ancestor_id, descendant_id)
+            .block_on()
+            .unwrap()
     }
 
     #[test_case(false; "memory")]
@@ -1250,42 +1254,51 @@ mod tests {
         index.add_commit_data(id_5.clone(), new_change_id(), &[id_4.clone(), id_2.clone()]);
 
         // Empty input
-        assert!(index.heads(&mut [].iter())?.is_empty());
+        assert!(index.heads(&mut [].iter()).block_on()?.is_empty());
         // Single head
-        assert_eq!(index.heads(&mut [id_4.clone()].iter())?, vec![id_4.clone()]);
+        assert_eq!(
+            index.heads(&mut [id_4.clone()].iter()).block_on()?,
+            vec![id_4.clone()]
+        );
         // Single head and parent
         assert_eq!(
-            index.heads(&mut [id_4.clone(), id_1].iter())?,
+            index.heads(&mut [id_4.clone(), id_1].iter()).block_on()?,
             vec![id_4.clone()]
         );
         // Single head and grand-parent
         assert_eq!(
-            index.heads(&mut [id_4.clone(), id_0].iter())?,
+            index.heads(&mut [id_4.clone(), id_0].iter()).block_on()?,
             vec![id_4.clone()]
         );
         // Multiple heads
         assert_eq!(
-            index.heads(&mut [id_3.clone(), id_4.clone()].iter())?,
+            index
+                .heads(&mut [id_3.clone(), id_4.clone()].iter())
+                .block_on()?,
             vec![id_4.clone(), id_3.clone()]
         );
         // Duplicated inputs
         assert_eq!(
-            index.heads(&mut [id_4.clone(), id_3.clone(), id_4.clone()].iter())?,
+            index
+                .heads(&mut [id_4.clone(), id_3.clone(), id_4.clone()].iter())
+                .block_on()?,
             vec![id_4.clone(), id_3.clone()]
         );
         // Merge commit and ancestors
         assert_eq!(
-            index.heads(&mut [id_5.clone(), id_2].iter())?,
+            index.heads(&mut [id_5.clone(), id_2].iter()).block_on()?,
             vec![id_5.clone()]
         );
         // Merge commit and other commit
         assert_eq!(
-            index.heads(&mut [id_5.clone(), id_3.clone()].iter())?,
+            index
+                .heads(&mut [id_5.clone(), id_3.clone()].iter())
+                .block_on()?,
             vec![id_5.clone(), id_3.clone()]
         );
 
         assert_eq!(
-            index.all_heads_for_gc()?.collect_vec(),
+            index.all_heads_for_gc().block_on()?.collect_vec(),
             vec![id_3.clone(), id_5.clone()]
         );
         Ok(())

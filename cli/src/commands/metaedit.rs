@@ -150,7 +150,8 @@ pub(crate) async fn cmd_metaedit(
         .check_rewritable_expr(&target_expr)
         .await?;
     let commit_ids: Vec<_> = target_expr
-        .evaluate(workspace_command.repo().as_ref())?
+        .evaluate(workspace_command.repo().as_ref())
+        .await?
         .stream()
         .try_collect()
         .await?;

@@ -441,7 +441,8 @@ async fn plan_rebase_revisions(
         .check_rewritable_expr(&target_expr)
         .await?;
     let target_commit_ids: Vec<_> = target_expr
-        .evaluate(workspace_command.repo().as_ref())?
+        .evaluate(workspace_command.repo().as_ref())
+        .await?
         .stream()
         .try_collect()
         .await?; // in reverse topological order
@@ -503,7 +504,7 @@ async fn plan_rebase_source(
                 .store()
                 .get_commit_async(id)
                 .await?;
-            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit)?;
+            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit).await?;
         }
     }
 
@@ -553,6 +554,7 @@ async fn plan_rebase_branch(
         .await?;
     let root_commit_ids: Vec<_> = roots_expression
         .evaluate(workspace_command.repo().as_ref())
+        .await
         .unwrap()
         .stream()
         .try_collect()
@@ -564,7 +566,7 @@ async fn plan_rebase_branch(
                 .store()
                 .get_commit_async(id)
                 .await?;
-            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit)?;
+            check_rebase_destinations(workspace_command.repo(), &new_parent_ids, &commit).await?;
         }
     }
 
@@ -575,7 +577,7 @@ async fn plan_rebase_branch(
     })
 }
 
-fn check_rebase_destinations(
+async fn check_rebase_destinations(
     repo: &Arc<ReadonlyRepo>,
     new_parents: &[CommitId],
     commit: &Commit,
@@ -587,7 +589,7 @@ fn check_rebase_destinations(
                 short_commit_hash(commit.id()),
             )));
         }
-        if repo.index().is_ancestor(commit.id(), parent_id)? {
+        if repo.index().is_ancestor(commit.id(), parent_id).await? {
             return Err(user_error(format!(
                 "Cannot rebase {} onto descendant {}",
                 short_commit_hash(commit.id()),
