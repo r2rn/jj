@@ -1505,7 +1505,7 @@ impl Backend for GitBackend {
     }
 
     #[tracing::instrument(skip(self, index))]
-    fn gc(&self, index: &dyn Index, keep_newer: SystemTime) -> BackendResult<()> {
+    async fn gc(&self, index: &dyn Index, keep_newer: SystemTime) -> BackendResult<()> {
         let git_repo = self.lock_git_repo();
         let new_heads = index
             .all_heads_for_gc()

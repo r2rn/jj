@@ -209,7 +209,7 @@ impl Backend for JitBackend {
         self.inner.get_copy_records(paths, root, head)
     }
 
-    fn gc(&self, index: &dyn Index, keep_newer: SystemTime) -> BackendResult<()> {
-        self.inner.gc(index, keep_newer)
+    async fn gc(&self, index: &dyn Index, keep_newer: SystemTime) -> BackendResult<()> {
+        self.inner.gc(index, keep_newer).await
     }
 }

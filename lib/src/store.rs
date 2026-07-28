@@ -252,8 +252,8 @@ impl Store {
         self.backend.write_symlink(path, contents).await
     }
 
-    pub fn gc(&self, index: &dyn Index, keep_newer: SystemTime) -> BackendResult<()> {
-        self.backend.gc(index, keep_newer)
+    pub async fn gc(&self, index: &dyn Index, keep_newer: SystemTime) -> BackendResult<()> {
+        self.backend.gc(index, keep_newer).await
     }
 
     /// Clear cached objects. Mainly intended for testing.
